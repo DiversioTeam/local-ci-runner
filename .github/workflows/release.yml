@@ -104,10 +104,10 @@ jobs:
           cd tap-repo
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- Formula/local-ci.rb; then
+          git add Formula/local-ci.rb
+          if git diff --cached --quiet -- Formula/local-ci.rb; then
             echo "No tap changes to commit"
             exit 0
           fi
-          git add Formula/local-ci.rb
           git commit -m "Update local-ci to ${GITHUB_REF_NAME}"
           git push origin HEAD
