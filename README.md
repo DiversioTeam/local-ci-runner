@@ -21,6 +21,17 @@ Why that matters:
 - verified runs can post status updates back to GitHub so PRs and commits show
   results people can actually trust
 
+## At a glance
+
+```mermaid
+flowchart LR
+    A[Powerful local machine] --> B[local-ci]
+    B --> C[Run the repo's real checks]
+    C --> D[Save logs and results]
+    D --> E[Post status back to GitHub]
+    E --> F[PR or commit shows checks people can trust]
+```
+
 ## Install
 
 ```bash
