@@ -22,7 +22,7 @@ brew upgrade local-ci
 ```
 
 <p align="center">
-  <img src="./assets/local-ci-overview.svg" alt="local-ci overview: you bring the machine, the repo brings the rules, local-ci runs the exact plan locally, you inspect the run, and GitHub gets a status only for the verified snapshot" width="1100" />
+  <img src="./assets/local-ci-overview.png" alt="local-ci overview: you bring the machine, the repo brings the rules, local-ci runs the exact plan locally, you inspect the run, and GitHub gets a status only for the verified snapshot" width="1100" />
 </p>
 
 ## What this is
