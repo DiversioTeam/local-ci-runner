@@ -1,0 +1,16 @@
+version = 1
+
+[github]
+enabled = true
+aggregate_context = "local/verify"
+
+[[steps]]
+id = "fmt"
+command = ["go", "fmt", "./..."]
+github_context = "local/fmt"
+
+[[steps]]
+id = "test"
+command = ["go", "test", "./..."]
+needs = ["fmt"]
+github_context = "local/test"

@@ -1,0 +1,6 @@
+.DS_Store
+.local-ci/
+bin/
+dist/
+coverage.out
+*.test
