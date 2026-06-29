@@ -2,6 +2,25 @@
 
 Shared local CI runner for repo-owned verification steps.
 
+`local-ci` exists to run verification where the code actually lives: on a
+local machine with real horsepower, fast feedback, and the full working copy
+right in front of you.
+
+Instead of leaning on slow, generic CI boxes for every meaningful check, a repo
+can define its own plan and run it locally. That makes it much easier for
+engineers — and the tools helping them — to run the same checks, inspect the
+same logs, and understand exactly what happened.
+
+The point is not to create a second mystery CI system. The point is to make
+verification faster to run, easier to debug, and easier to trust.
+
+Why that matters:
+- local hardware is often much stronger than shared CI workers
+- the repo keeps ownership of its own checks and planner logic
+- every run leaves behind clear on-disk artifacts for inspection
+- verified runs can post status updates back to GitHub so PRs and commits show
+  results people can actually trust
+
 ## Install
 
 ```bash
