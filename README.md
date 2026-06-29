@@ -25,11 +25,18 @@ Why that matters:
 
 ```mermaid
 flowchart LR
-    A[Powerful local machine] --> B[local-ci]
-    B --> C[Run the repo's real checks]
-    C --> D[Save logs and results]
-    D --> E[Post status back to GitHub]
-    E --> F[PR or commit shows checks people can trust]
+    subgraph OLD[Old way]
+        A[Change code] --> B[Send checks to a small shared CI machine]
+        B --> C[Wait]
+        C --> D[Read the result later]
+    end
+
+    subgraph NEW[With local-ci]
+        E[Change code] --> F[Run the same checks on your strong local machine]
+        F --> G[See logs and failures right away]
+        G --> H[Post the result back to GitHub]
+        H --> I[PR or commit shows a check people can trust]
+    end
 ```
 
 ## Install
