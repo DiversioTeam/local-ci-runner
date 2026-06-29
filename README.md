@@ -2,6 +2,13 @@
 
 Shared local CI runner for repo-owned verification steps.
 
+## Docs and harness
+
+- Start with [`AGENTS.md`](./AGENTS.md) for the short agent-facing map.
+- Use [`docs/README.md`](./docs/README.md) for the full docs index.
+- Use [`cmd/local-ci/MANUAL.md`](./cmd/local-ci/MANUAL.md) when you need the
+  long-form CLI reference that also ships inside the binary.
+
 ## Scope
 
 This repo is the runner, not the checks themselves.
@@ -289,7 +296,19 @@ Author/contact:
 ## Development
 
 ```bash
+gofmt -w cmd internal
 go test ./...
+go vet ./...
+ruff check .
+go build ./cmd/local-ci
+go run ./cmd/local-ci --help
+go run ./cmd/local-ci manual
 ```
 
-See `docs/architecture.md` and `docs/contracts.md`.
+Notes:
+- `ruff check .` is currently a no-op because the repo has no tracked Python
+  files, but keep it green if Python helpers appear later.
+- Start from `examples/basic/.local-ci.toml` when you want a minimal static
+  config example.
+
+See [`docs/README.md`](./docs/README.md), [`docs/architecture.md`](./docs/architecture.md), and [`docs/contracts.md`](./docs/contracts.md).
