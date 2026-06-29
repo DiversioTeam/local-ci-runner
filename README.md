@@ -21,24 +21,6 @@ Why that matters:
 - verified runs can post status updates back to GitHub so PRs and commits show
   results people can actually trust
 
-## At a glance
-
-```mermaid
-flowchart LR
-    subgraph OLD[Old way]
-        A[Change code] --> B[Send checks to a small shared CI machine]
-        B --> C[Wait]
-        C --> D[Read the result later]
-    end
-
-    subgraph NEW[With local-ci]
-        E[Change code] --> F[Run the same checks on your strong local machine]
-        F --> G[See logs and failures right away]
-        G --> H[Post the result back to GitHub]
-        H --> I[PR or commit shows a check people can trust]
-    end
-```
-
 ## Install
 
 ```bash
@@ -51,6 +33,18 @@ Upgrade later with:
 ```bash
 brew update
 brew upgrade local-ci
+```
+
+## In one line
+
+Old way: send checks to a smaller shared CI machine and wait.
+
+```mermaid
+flowchart LR
+    A[Change code] --> B[Run the repo's checks on your own machine]
+    B --> C[See logs and failures right away]
+    C --> D[Post the result to GitHub]
+    D --> E[PR shows a check people can trust]
 ```
 
 ## What this is
