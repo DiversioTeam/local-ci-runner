@@ -159,6 +159,7 @@ local-ci show <run-id>
 local-ci logs <run-id>
 local-ci logs <run-id> --step <step-id>
 local-ci publish <run-id>
+local-ci version
 local-ci manual
 ```
 
@@ -166,6 +167,7 @@ Flags:
 - `--config <path>` on `run` and `resume`
 - `--no-github` on `run` and `resume`
 - `--json` on `runs`, `show`, and `logs`
+- `--version` as a top-level shortcut
 
 ### Quick operator flow
 
@@ -231,6 +233,51 @@ Current CLI scope:
 - planner-backed config works
 - inspection commands work against `.local-ci/runs/<run-id>/`
 - the current checkout must already have a real `HEAD` commit for `run` and `resume`
+
+## Releases and Homebrew
+
+Release tags use the form:
+
+```text
+v0.1.0
+```
+
+Release builds inject that tag into the binary, so:
+
+```bash
+local-ci version
+```
+
+prints the installed release version.
+
+The binary also checks GitHub releases and, when a newer tagged release is
+available, prints a short update notice at command startup in interactive use:
+
+```text
+update available: v0.1.0 -> v0.2.0; run: brew update && brew upgrade local-ci
+```
+
+Release automation lives in:
+- `.github/workflows/release.yml`
+- `scripts/release/write-homebrew-formula.sh`
+
+The Diversio Homebrew tap repo is:
+- `https://github.com/DiversioTeam/homebrew-tap`
+
+Once a tagged release exists, install from the tap with:
+
+```bash
+brew tap DiversioTeam/tap
+brew install local-ci
+```
+
+The release workflow will also update the tap formula when the source repo has:
+
+```text
+HOMEBREW_TAP_TOKEN
+```
+
+configured as a GitHub Actions secret with push access to the tap repo.
 
 ## License
 

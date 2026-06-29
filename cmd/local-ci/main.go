@@ -21,6 +21,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/gitrepo"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 	"github.com/DiversioTeam/local-ci-runner/internal/planner"
+	"github.com/DiversioTeam/local-ci-runner/internal/update"
 )
 
 var errRunFailed = errors.New("run finished unsuccessfully")
@@ -118,7 +119,25 @@ func newCLI(stdout io.Writer, stderr io.Writer, cwd string) *cli {
 	}
 }
 
+func (c *cli) maybePrintUpdateNotice() {
+	if !isTerminalWriter(c.stderr) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	message, err := update.Checker{}.Notice(ctx)
+	if err != nil || message == "" {
+		return
+	}
+	_, _ = fmt.Fprintln(c.stderr, message)
+}
+
+func (c *cli) printVersion() {
+	_, _ = fmt.Fprintf(c.stdout, "local-ci %s\n", update.Version)
+}
+
 func (c *cli) run(args []string) error {
+	c.maybePrintUpdateNotice()
 	if len(args) == 0 {
 		c.printTopHelp()
 		return nil
@@ -127,8 +146,19 @@ func (c *cli) run(args []string) error {
 		c.printTopHelp()
 		return nil
 	}
+	if args[0] == "--version" {
+		c.printVersion()
+		return nil
+	}
 
 	switch args[0] {
+	case "version":
+		if hasHelpFlag(args[1:]) {
+			c.printVersionHelp()
+			return nil
+		}
+		c.printVersion()
+		return nil
 	case "help":
 		return c.helpCommand(args[1:])
 	case "manual":
@@ -188,6 +218,8 @@ func (c *cli) helpCommand(args []string) error {
 		return c.manualCommand(nil)
 	case "publish":
 		c.printPublishHelp()
+	case "version":
+		c.printVersionHelp()
 	case "run":
 		c.printRunHelp()
 	case "resume":
@@ -1424,6 +1456,7 @@ Main commands:
   local-ci show <run-id>       Snapshot a finished or still-running run from persisted artifacts.
   local-ci logs <run-id>       Read runner, planner, or step logs from disk.
   local-ci publish <run-id>    Post a completed run to the current clean HEAD when the snapshot still matches.
+  local-ci version             Print the installed version.
   local-ci manual              Print the built-in long-form manual.
 
 Debugging flow:
@@ -1445,6 +1478,20 @@ Log types:
 
 Use 'local-ci help <command>' or 'local-ci <command> --help' for command details.
 Use 'local-ci manual' or 'local-ci help all' for the full built-in guide.
+Use 'local-ci version' or 'local-ci --version' to print the installed version.
+`)
+}
+
+func (c *cli) printVersionHelp() {
+	_, _ = io.WriteString(c.stdout, `Usage:
+  local-ci version
+  local-ci --version
+
+Print the installed local-ci version.
+
+Notes:
+  - Release builds print the tag version, for example v0.1.0.
+  - Development builds print dev.
 `)
 }
 
