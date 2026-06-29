@@ -2,24 +2,10 @@
 
 Shared local CI runner for repo-owned verification steps.
 
-`local-ci` exists to run verification where the code actually lives: on a
-local machine with real horsepower, fast feedback, and the full working copy
-right in front of you.
-
-Instead of leaning on slow, generic CI boxes for every meaningful check, a repo
-can define its own plan and run it locally. That makes it much easier for
-engineers — and the tools helping them — to run the same checks, inspect the
-same logs, and understand exactly what happened.
-
-The point is not to create a second mystery CI system. The point is to make
-verification faster to run, easier to debug, and easier to trust.
-
-Why that matters:
-- local hardware is often much stronger than shared CI workers
-- the repo keeps ownership of its own checks and planner logic
-- every run leaves behind clear on-disk artifacts for inspection
-- verified runs can post status updates back to GitHub so PRs and commits show
-  results people can actually trust
+`local-ci` lets a repository define its own verification plan, run that exact
+plan on a developer machine, keep the full run artifacts local, and post a
+GitHub status only when the verified snapshot still matches the commit being
+reported.
 
 ## Install
 
@@ -35,17 +21,9 @@ brew update
 brew upgrade local-ci
 ```
 
-## In one line
-
-Old way: send checks to a smaller shared CI machine and wait.
-
-```mermaid
-flowchart LR
-    A[Change code] --> B[Run the repo's checks on your own machine]
-    B --> C[See logs and failures right away]
-    C --> D[Post the result to GitHub]
-    D --> E[PR shows a check people can trust]
-```
+<p align="center">
+  <img src="./assets/local-ci-overview.svg" alt="local-ci overview: you bring the machine, the repo brings the rules, local-ci runs the exact plan locally, you inspect the run, and GitHub gets a status only for the verified snapshot" width="1100" />
+</p>
 
 ## What this is
 
