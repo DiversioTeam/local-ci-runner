@@ -24,6 +24,7 @@ Fast command reminder:
 ```bash
 local-ci --help
 local-ci help <command>
+local-ci version
 local-ci manual
 ```
 
@@ -98,6 +99,7 @@ local-ci publish <run-id>
 local-ci --help
 local-ci help <command>
 local-ci help all
+local-ci version
 local-ci manual
 ```
 
@@ -464,7 +466,33 @@ Examples:
 local-ci publish 20260627T150405Z-deadbeef
 ```
 
-### 7.7 `local-ci manual`
+### 7.7 `local-ci version`
+
+Usage:
+
+```bash
+local-ci version
+local-ci --version
+```
+
+Purpose:
+- print the installed binary version
+- make release builds and update notices easy to verify
+
+Release builds use the Git tag version, for example:
+
+```text
+v0.1.0
+```
+
+Interactive commands also check the latest GitHub release on a small cache and,
+when a newer version exists, print:
+
+```text
+update available: v0.1.0 -> v0.2.0; run: brew update && brew upgrade local-ci
+```
+
+### 7.8 `local-ci manual`
 
 Usage:
 
@@ -647,6 +675,12 @@ stored plan hash          == current resolved plan hash
 ```
 
 If any of those differ, the old run is not trusted for posting.
+
+### I want to see which version is installed
+
+```bash
+local-ci version
+```
 
 ### I want machine-readable output
 

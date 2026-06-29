@@ -41,6 +41,7 @@ func TestHelpSurfaces(t *testing.T) {
 		{name: "runs", args: []string{"runs", "--help"}, want: "Usage:\n  local-ci runs"},
 		{name: "show", args: []string{"show", "--help"}, want: "Works for both active and finished runs."},
 		{name: "publish", args: []string{"publish", "--help"}, want: "Usage:\n  local-ci publish <run-id>"},
+		{name: "version", args: []string{"version", "--help"}, want: "Usage:\n  local-ci version"},
 		{name: "logs", args: []string{"logs", "--help"}, want: "Defaults:"},
 		{name: "help alias", args: []string{"help", "logs"}, want: "--step <id>"},
 		{name: "manual", args: []string{"manual"}, want: "## 11. Safety rules and failure modes"},

@@ -1,0 +1,113 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  TAP_REPO: DiversioTeam/homebrew-tap
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Verify release input
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l cmd internal)"
+          go test ./...
+          go vet ./...
+
+      - name: Build release archives
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            BINARY="local-ci"
+            ARCHIVE="dist/local-ci_${VERSION}_${GOOS}_${GOARCH}.tar.gz"
+            GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 \
+              go build \
+              -ldflags "-s -w -X github.com/DiversioTeam/local-ci-runner/internal/update.Version=${GITHUB_REF_NAME}" \
+              -o "$BINARY" \
+              ./cmd/local-ci
+            tar -czf "$ARCHIVE" "$BINARY"
+            rm -f "$BINARY"
+          done
+          (cd dist && shasum -a 256 *.tar.gz > checksums.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  update-homebrew-tap:
+    runs-on: ubuntu-latest
+    needs: github-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir dist
+
+      - name: Generate formula
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          chmod +x scripts/release/write-homebrew-formula.sh
+          mkdir -p tap/Formula
+          scripts/release/write-homebrew-formula.sh "$VERSION" dist tap/Formula/local-ci.rb
+
+      - name: Push formula update
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN}" ]]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured; skipping tap update"
+            exit 0
+          fi
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap-repo
+          mkdir -p tap-repo/Formula
+          cp tap/Formula/local-ci.rb tap-repo/Formula/local-ci.rb
+          cd tap-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/local-ci.rb
+          if git diff --cached --quiet -- Formula/local-ci.rb; then
+            echo "No tap changes to commit"
+            exit 0
+          fi
+          git commit -m "Update local-ci to ${GITHUB_REF_NAME}"
+          git push origin HEAD
