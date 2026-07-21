@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -229,7 +229,7 @@ func TestRunsListsNewestFirstAndMarksActiveRun(t *testing.T) {
 	if !strings.Contains(output, "running") {
 		t.Fatalf("runs output missing running status:\n%s", output)
 	}
-	if !strings.Contains(output, "4242") {
+	if !strings.Contains(output, fmt.Sprintf("%d", os.Getpid())) {
 		t.Fatalf("runs output missing active runner pid:\n%s", output)
 	}
 	if !strings.Contains(output, "failure") {
@@ -250,7 +250,7 @@ func TestShowWorksForActiveAndFinishedRuns(t *testing.T) {
 	if !strings.Contains(activeText, "status: running") {
 		t.Fatalf("active show missing running status:\n%s", activeText)
 	}
-	if !strings.Contains(activeText, "pid: 4242") {
+	if !strings.Contains(activeText, fmt.Sprintf("pid: %d", os.Getpid())) {
 		t.Fatalf("active show missing runner pid:\n%s", activeText)
 	}
 	if !strings.Contains(activeText, "head_tree: head-tree") || !strings.Contains(activeText, "worktree_tree: worktree-tree") {
@@ -282,6 +282,61 @@ func TestShowWorksForActiveAndFinishedRuns(t *testing.T) {
 	}
 	if !strings.Contains(finishedText, filepath.Join(fixture.finishedRun.RunDir, persistence.StepRelPath(1, "fail", persistence.CombinedLog))) {
 		t.Fatalf("finished show missing failing combined log path:\n%s", finishedText)
+	}
+}
+
+func TestInspectionFlagsDeadRunner(t *testing.T) {
+	fixture := newCLIFixture(t)
+
+	finishedProcess := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := finishedProcess.Start(); err != nil {
+		t.Fatalf("start process: %v", err)
+	}
+	deadProcessID := finishedProcess.Process.Pid
+	if err := finishedProcess.Wait(); err != nil {
+		t.Fatalf("wait for process: %v", err)
+	}
+	if runnerAlive, known := getProcessAlive(deadProcessID); !known {
+		t.Skip("process liveness is unavailable on this platform")
+	} else if runnerAlive {
+		t.Fatalf("finished process %d is still reported alive", deadProcessID)
+	}
+
+	meta, err := persistence.ReadJSONFile[persistence.Meta](fixture.store.RunFile(fixture.activeRun.RunID, persistence.MetaFile))
+	if err != nil {
+		t.Fatalf("ReadJSONFile(meta) error = %v", err)
+	}
+	meta.RunnerPID = &deadProcessID
+	if err := persistence.WriteJSONFile(fixture.store.RunFile(fixture.activeRun.RunID, persistence.MetaFile), meta); err != nil {
+		t.Fatalf("WriteJSONFile(meta) error = %v", err)
+	}
+
+	runsOutput := &bytes.Buffer{}
+	if err := newCLI(runsOutput, &bytes.Buffer{}, fixture.root).run([]string{"runs"}); err != nil {
+		t.Fatalf("runs error = %v", err)
+	}
+	if got := runsOutput.String(); !strings.Contains(got, "running (dead)") {
+		t.Fatalf("runs output = %q, want dead runner", got)
+	}
+
+	showOutput := &bytes.Buffer{}
+	if err := newCLI(showOutput, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID}); err != nil {
+		t.Fatalf("show error = %v", err)
+	}
+	if got := showOutput.String(); !strings.Contains(got, fmt.Sprintf("pid: %d (dead)", deadProcessID)) {
+		t.Fatalf("show output = %q, want dead runner", got)
+	}
+
+	jsonOutput := &bytes.Buffer{}
+	if err := newCLI(jsonOutput, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID, "--json"}); err != nil {
+		t.Fatalf("show --json error = %v", err)
+	}
+	var payload showJSON
+	if err := json.Unmarshal(jsonOutput.Bytes(), &payload); err != nil {
+		t.Fatalf("decode show json: %v", err)
+	}
+	if payload.RunnerAlive == nil || *payload.RunnerAlive {
+		t.Fatalf("runner_alive = %v, want false", payload.RunnerAlive)
 	}
 }
 
@@ -399,6 +454,11 @@ func TestJSONModes(t *testing.T) {
 	if got, want := showPayload.Status, string(engine.StepStateRunning); got != want {
 		t.Fatalf("show status = %q, want %q", got, want)
 	}
+	if _, known := getProcessAlive(os.Getpid()); known {
+		if showPayload.RunnerAlive == nil || !*showPayload.RunnerAlive {
+			t.Fatalf("runner_alive = %v, want true", showPayload.RunnerAlive)
+		}
+	}
 
 	logsOut := &bytes.Buffer{}
 	if err := newCLI(logsOut, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID, "--json"}); err != nil {
@@ -452,8 +512,7 @@ func newCLIFixture(t *testing.T) cliFixture {
 	if err != nil {
 		t.Fatalf("PrepareRun(finished) error = %v", err)
 	}
-	finishedRun, err = engine.ExecuteRun(store, finishedRun, engine.ExecuteOptions{
-		Context:  context.Background(),
+	finishedRun, err = engine.ExecuteRun(t.Context(), store, finishedRun, engine.ExecuteOptions{
 		Stdout:   io.Discard,
 		Stderr:   io.Discard,
 		Progress: io.Discard,
@@ -490,7 +549,7 @@ func markRunActive(t *testing.T, store persistence.Store, run engine.RunRecord, 
 
 	run.Meta.StartedAt = &startedAt
 	run.Meta.FinishedAt = nil
-	runnerPID := 4242
+	runnerPID := os.Getpid()
 	run.Meta.RunnerPID = &runnerPID
 	run.Meta.HeadTreeHash = "head-tree"
 	run.Meta.WorktreeTreeHash = "worktree-tree"

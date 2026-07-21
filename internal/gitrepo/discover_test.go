@@ -2,6 +2,7 @@ package gitrepo
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,19 @@ func TestParseGitHubSlug(t *testing.T) {
 	}
 }
 
+func TestDiscoverRootReturnsCancellationCause(t *testing.T) {
+	t.Parallel()
+
+	cancellationCause := errors.New("stop git")
+	discoverContext, cancelDiscover := context.WithCancelCause(t.Context())
+	cancelDiscover(cancellationCause)
+
+	_, err := DiscoverRoot(discoverContext, t.TempDir())
+	if !errors.Is(err, cancellationCause) {
+		t.Fatalf("DiscoverRoot() error = %v, want %v", err, cancellationCause)
+	}
+}
+
 func TestDiscoverRejectsRepoWithoutCommits(t *testing.T) {
 	t.Parallel()
 
@@ -41,7 +55,7 @@ func TestDiscoverRejectsRepoWithoutCommits(t *testing.T) {
 	runGit(t, repoRoot, "init")
 	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
 
-	_, err := Discover(context.Background(), repoRoot)
+	_, err := Discover(t.Context(), repoRoot)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -67,7 +81,7 @@ func TestDiscover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(%s) error = %v", repoRoot, err)
 	}
-	info, err := Discover(context.Background(), repoRoot)
+	info, err := Discover(t.Context(), repoRoot)
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
@@ -104,7 +118,7 @@ func TestDiscoverMarksDirtyWorktree(t *testing.T) {
 	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
 	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# dirty\n"))
 
-	info, err := Discover(context.Background(), repoRoot)
+	info, err := Discover(t.Context(), repoRoot)
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
@@ -145,7 +159,7 @@ func TestDiscoverIgnoresLocalCIArtifacts(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(repoRoot, ".local-ci", "runs", "run-1", "meta.json"), []byte("{}\n"))
 
-	info, err := Discover(context.Background(), repoRoot)
+	info, err := Discover(t.Context(), repoRoot)
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}

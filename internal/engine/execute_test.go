@@ -2,11 +2,14 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
@@ -28,7 +31,7 @@ func TestExecuteRunStreamsProgressAndProcessOutput(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	var progress bytes.Buffer
-	_, err := ExecuteRun(fixture.store, run, ExecuteOptions{
+	_, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{
 		Stdout:   &stdout,
 		Stderr:   &stderr,
 		Progress: &progress,
@@ -77,7 +80,7 @@ func TestExecuteRunCapturesLogsEventsAndBlockedSteps(t *testing.T) {
 	fixture := newRunFixture(t, plan)
 	run := prepareRunFixture(t, fixture)
 
-	executed, err := ExecuteRun(fixture.store, run, ExecuteOptions{})
+	executed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{})
 	if err != nil {
 		t.Fatalf("ExecuteRun() error = %v", err)
 	}
@@ -194,7 +197,7 @@ func TestExecuteRunHonorsTopologicalOrderAndSkipConditions(t *testing.T) {
 	fixture := newRunFixture(t, plan)
 	run := prepareRunFixture(t, fixture)
 
-	executed, err := ExecuteRun(fixture.store, run, ExecuteOptions{})
+	executed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{})
 	if err != nil {
 		t.Fatalf("ExecuteRun() error = %v", err)
 	}
@@ -246,7 +249,7 @@ func TestExecuteRunPostsGitHubStatuses(t *testing.T) {
 	run := prepareRunFixture(t, fixture)
 	reporter := &fakeReporter{}
 
-	_, err := ExecuteRun(fixture.store, run, ExecuteOptions{Reporter: reporter})
+	_, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{Reporter: reporter})
 	if err != nil {
 		t.Fatalf("ExecuteRun() error = %v", err)
 	}
@@ -266,6 +269,185 @@ func TestExecuteRunPostsGitHubStatuses(t *testing.T) {
 		"local/verify=failure",
 	}
 	assertStatusPosts(t, got, want)
+}
+
+func TestPostTerminalStatusDuringRunRetriesAfterCancellation(t *testing.T) {
+	runContext, cancelRun := context.WithCancelCause(t.Context())
+	attempts := 0
+
+	err := postTerminalStatusDuringRun(runContext, func(reportContext context.Context) error {
+		attempts++
+		if attempts == 1 {
+			cancelRun(InterruptError{Signal: syscall.SIGTERM})
+			<-reportContext.Done()
+			return reportContext.Err()
+		}
+		if reportContext.Err() != nil {
+			t.Fatalf("retry context error = %v, want nil", reportContext.Err())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("postTerminalStatusDuringRun() error = %v", err)
+	}
+	if got, want := attempts, 2; got != want {
+		t.Fatalf("attempts = %d, want %d", got, want)
+	}
+}
+
+func TestExecuteRunFinalizesInterruptedStep(t *testing.T) {
+	plan := config.ResolvedPlan{Steps: []config.Step{
+		{
+			ID:      "wait",
+			Command: []string{"/bin/sh", "-c", "if [ -f \"$LOCAL_CI_REPO_ROOT/allow-finish\" ]; then exit 0; fi; trap 'printf terminated > \"$LOCAL_CI_REPO_ROOT/signal-received\"; exit 0' TERM; printf started > \"$LOCAL_CI_REPO_ROOT/step-started\"; while :; do sleep 1; done"},
+		},
+		{
+			ID:      "after",
+			Needs:   []string{"wait"},
+			Command: []string{"/bin/sh", "-c", "printf should-not-run"},
+		},
+	}}
+	plan.ApplyDefaults()
+
+	fixture := newRunFixtureWithGitHub(t, plan, config.GitHub{Enabled: true, AggregateContext: config.DefaultAggregateContext})
+	run := prepareRunFixture(t, fixture)
+	runContext, cancelRun := context.WithCancelCause(t.Context())
+	forceStop := make(chan struct{})
+	defer func() {
+		cancelRun(InterruptError{Signal: syscall.SIGTERM})
+		select {
+		case <-forceStop:
+		default:
+			close(forceStop)
+		}
+	}()
+	reporter := &fakeReporter{}
+
+	type executionResult struct {
+		run RunRecord
+		err error
+	}
+	resultChannel := make(chan executionResult, 1)
+	go func() {
+		executed, err := ExecuteRun(runContext, fixture.store, run, ExecuteOptions{
+			ForceStop: forceStop,
+			Reporter:  reporter,
+		})
+		resultChannel <- executionResult{run: executed, err: err}
+	}()
+
+	startedMarker := filepath.Join(fixture.repoRoot, "step-started")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(startedMarker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("step did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancelRun(InterruptError{Signal: syscall.SIGTERM})
+
+	var result executionResult
+	select {
+	case result = <-resultChannel:
+	case <-time.After(5 * time.Second):
+		close(forceStop)
+		select {
+		case <-resultChannel:
+		case <-time.After(5 * time.Second):
+		}
+		t.Fatal("interrupted run did not finish gracefully")
+	}
+	if result.err != nil {
+		t.Fatalf("ExecuteRun() error = %v", result.err)
+	}
+	if got, want := result.run.Summary.Status, string(StepStateInterrupted); got != want {
+		t.Fatalf("summary status = %q, want %q", got, want)
+	}
+	if result.run.Meta.FinishedAt == nil {
+		t.Fatal("expected interrupted run finish time")
+	}
+	if got, want := result.run.StepStatuses[0].State, string(StepStateInterrupted); got != want {
+		t.Fatalf("wait state = %q, want %q", got, want)
+	}
+	if result.run.StepStatuses[0].ExitCode != nil {
+		t.Fatalf("interrupted exit code = %v, want nil", result.run.StepStatuses[0].ExitCode)
+	}
+	if got, want := result.run.StepStatuses[1].State, string(StepStatePending); got != want {
+		t.Fatalf("after state = %q, want %q", got, want)
+	}
+
+	loaded, err := LoadRun(fixture.store, run.RunID)
+	if err != nil {
+		t.Fatalf("LoadRun() error = %v", err)
+	}
+	if got, want := loaded.Summary.Status, string(StepStateInterrupted); got != want {
+		t.Fatalf("loaded summary status = %q, want %q", got, want)
+	}
+
+	if got := mustReadFile(t, filepath.Join(fixture.repoRoot, "signal-received")); got != "terminated" {
+		t.Fatalf("signal marker = %q, want terminated", got)
+	}
+
+	combinedLog := mustReadFile(t, fixture.store.StepFile(run.RunID, 0, "wait", persistence.CombinedLog))
+	if !strings.Contains(combinedLog, "run interrupted by terminated") {
+		t.Fatalf("combined log = %q, want interruption message", combinedLog)
+	}
+
+	eventItems := mustReadEvents(t, fixture.store.RunFile(run.RunID, persistence.EventsFile))
+	if got, want := eventItems[len(eventItems)-1].Type, events.GitHubStatusPosted; got != want {
+		t.Fatalf("last event type = %q, want %q", got, want)
+	}
+	runFinished := findNthEventOfType(t, eventItems, events.RunFinished, 1)
+	if got, want := runFinished.Status, string(StepStateInterrupted); got != want {
+		t.Fatalf("run finished status = %q, want %q", got, want)
+	}
+
+	gotPosts := make([]string, 0, len(reporter.posts))
+	for _, post := range reporter.posts {
+		gotPosts = append(gotPosts, post.status.Context+"="+string(post.status.State))
+	}
+	wantPosts := []string{
+		"local/verify=pending",
+		"local/wait=pending",
+		"local/wait=error",
+		"local/verify=error",
+	}
+	assertStatusPosts(t, gotPosts, wantPosts)
+	for index, contextError := range reporter.contextErrors {
+		if contextError != nil {
+			t.Fatalf("report context %d error = %v, want nil", index, contextError)
+		}
+	}
+
+	publishError := PublishCompletedRun(t.Context(), fixture.store, result.run, PublishOptions{
+		Reporter:  &fakeReporter{},
+		TargetSHA: "def456",
+	})
+	if publishError == nil || !strings.Contains(publishError.Error(), "was interrupted") {
+		t.Fatalf("PublishCompletedRun() error = %v, want interrupted refusal", publishError)
+	}
+
+	if err := os.WriteFile(filepath.Join(fixture.repoRoot, "allow-finish"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(allow-finish) error = %v", err)
+	}
+	resumed, err := LoadRunForResume(fixture.store, run.RunID, fixture.identity)
+	if err != nil {
+		t.Fatalf("LoadRunForResume() error = %v", err)
+	}
+	resumed, err = ExecuteRun(t.Context(), fixture.store, resumed, ExecuteOptions{Reporter: &fakeReporter{}})
+	if err != nil {
+		t.Fatalf("resumed ExecuteRun() error = %v", err)
+	}
+	if got, want := resumed.Summary.Status, string(StepStateSuccess); got != want {
+		t.Fatalf("resumed summary status = %q, want %q", got, want)
+	}
+	if got, want := resumed.StepStatuses[1].State, string(StepStateSuccess); got != want {
+		t.Fatalf("resumed after state = %q, want %q", got, want)
+	}
 }
 
 func TestExecuteRunResumeReusesSuccessfulSteps(t *testing.T) {
@@ -292,7 +474,7 @@ func TestExecuteRunResumeReusesSuccessfulSteps(t *testing.T) {
 	fixture := newRunFixture(t, plan)
 	run := prepareRunFixture(t, fixture)
 
-	firstRun, err := ExecuteRun(fixture.store, run, ExecuteOptions{})
+	firstRun, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{})
 	if err != nil {
 		t.Fatalf("first ExecuteRun() error = %v", err)
 	}
@@ -304,7 +486,7 @@ func TestExecuteRunResumeReusesSuccessfulSteps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRunForResume() error = %v", err)
 	}
-	secondRun, err := ExecuteRun(fixture.store, loaded, ExecuteOptions{})
+	secondRun, err := ExecuteRun(t.Context(), fixture.store, loaded, ExecuteOptions{})
 	if err != nil {
 		t.Fatalf("second ExecuteRun() error = %v", err)
 	}

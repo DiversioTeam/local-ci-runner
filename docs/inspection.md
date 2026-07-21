@@ -59,6 +59,12 @@ start a run -> write files -> read files later
 That simple model is the reason active-run inspection works from another shell.
 There is no socket, daemon, or process attachment requirement.
 
+For unfinished runs, inspection performs an advisory liveness check on the
+stored runner PID when the platform supports it. A dead PID is displayed as
+`(dead)` and exposed as `runner_alive: false` in JSON. Inspection does not turn
+that inference into persisted `interrupted` state: SIGKILL, crashes, and power
+loss cannot run finalization code, and PIDs can be reused.
+
 ## What each command is for
 
 ### `local-ci runs`
@@ -70,7 +76,8 @@ It answers:
 - which one is newest?
 - which one is still running?
 - which PID owns the active run when known?
-- which one failed?
+- is that recorded PID no longer alive?
+- which one failed or was interrupted?
 
 Example:
 
@@ -86,11 +93,12 @@ Use this when you want the fastest high-level answer.
 It answers:
 - what is the overall state?
 - which PID owns the active run when known?
+- is that recorded PID no longer alive?
 - did this run execute on a dirty worktree?
 - what exact tree snapshot produced this run?
 - which files were dirty when the run started?
 - which step is running now?
-- which steps already failed, blocked, or went stale?
+- which steps were interrupted, failed, blocked, or went stale?
 - which log file should I open next?
 
 Example:
@@ -170,7 +178,7 @@ It should answer:
 - did it run on a dirty worktree?
 - what tree snapshot produced it?
 - where are the runner logs?
-- which step failed?
+- which step failed or was interrupted?
 - which exact combined log path should I open next?
 
 That plain-text index helps both humans and LLMs.
@@ -247,13 +255,14 @@ local-ci logs <run-id>
 local-ci logs <run-id> --step <running-step-id>
 ```
 
-### A run failed
+### A run failed or was interrupted
 
 ```bash
 local-ci show <run-id>
 local-ci logs <run-id>
-local-ci logs <run-id> --step <failing-step-id>
-local-ci logs <run-id> --step <failing-step-id> --stderr
+local-ci logs <run-id> --step <failing-or-interrupted-step-id>
+local-ci logs <run-id> --step <failing-or-interrupted-step-id> --stderr
+local-ci resume <run-id> # when the stored identity still matches
 ```
 
 ### I need to know whether an old local run is still trustworthy

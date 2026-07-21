@@ -6,6 +6,7 @@ const (
 	StatePending State = "pending"
 	StateSuccess State = "success"
 	StateFailure State = "failure"
+	StateError   State = "error"
 )
 
 type Target struct {

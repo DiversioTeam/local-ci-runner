@@ -70,6 +70,10 @@ Dirty worktree while iterating:
 local-ci run --no-github
 ```
 
+SIGINT or SIGTERM stops the active step—including its process group on macOS
+and Linux—persists the run as `interrupted`, and lets
+`local-ci resume <run-id>` rerun unfinished work.
+
 ## Command map
 
 ```bash

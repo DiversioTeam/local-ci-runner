@@ -22,14 +22,16 @@ type recordedStatus struct {
 }
 
 type fakeReporter struct {
-	posts []recordedStatus
-	err   error
+	posts         []recordedStatus
+	contextErrors []error
+	err           error
 }
 
-func (reporter *fakeReporter) PostStatus(_ context.Context, target ghstatus.Target, status ghstatus.Status) error {
+func (reporter *fakeReporter) PostStatus(reportContext context.Context, target ghstatus.Target, status ghstatus.Status) error {
 	if reporter.err != nil {
 		return reporter.err
 	}
+	reporter.contextErrors = append(reporter.contextErrors, reportContext.Err())
 	reporter.posts = append(reporter.posts, recordedStatus{target: target, status: status})
 	return nil
 }
@@ -63,6 +65,7 @@ func TestAggregateGitHubState(t *testing.T) {
 		{runStatus: string(StepStateSkipped), want: ghstatus.StateSuccess},
 		{runStatus: runStatusPending, want: ghstatus.StatePending},
 		{runStatus: string(StepStateFailure), want: ghstatus.StateFailure},
+		{runStatus: string(StepStateInterrupted), want: ghstatus.StateError},
 		{runStatus: string(StepStateBlocked), want: ghstatus.StateFailure},
 	}
 	for _, testCase := range cases {
@@ -86,7 +89,7 @@ func TestPostGitHubStatusAppendsEvent(t *testing.T) {
 	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
 	at := time.Date(2026, 6, 27, 15, 4, 5, 0, time.UTC)
 
-	err = postAggregateStatus(context.Background(), reporter, &appender, meta, ghstatus.StatePending, at)
+	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, at)
 	if err != nil {
 		t.Fatalf("postAggregateStatus() error = %v", err)
 	}
@@ -125,14 +128,13 @@ func TestPublishCompletedRunPostsTerminalStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareRun() error = %v", err)
 	}
-	completed, err := ExecuteRun(fixture.store, run, ExecuteOptions{})
+	completed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{})
 	if err != nil {
 		t.Fatalf("ExecuteRun() error = %v", err)
 	}
 
 	reporter := &fakeReporter{}
-	err = PublishCompletedRun(fixture.store, completed, PublishOptions{
-		Context:   context.Background(),
+	err = PublishCompletedRun(t.Context(), fixture.store, completed, PublishOptions{
 		Reporter:  reporter,
 		TargetSHA: "def456",
 		Now:       func() time.Time { return fixedRunTime },
@@ -166,13 +168,12 @@ func TestPublishCompletedRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareRun() error = %v", err)
 	}
-	completed, err := ExecuteRun(fixture.store, run, ExecuteOptions{Reporter: &fakeReporter{}})
+	completed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{Reporter: &fakeReporter{}})
 	if err != nil {
 		t.Fatalf("ExecuteRun() error = %v", err)
 	}
 
-	err = PublishCompletedRun(fixture.store, completed, PublishOptions{
-		Context:   context.Background(),
+	err = PublishCompletedRun(t.Context(), fixture.store, completed, PublishOptions{
 		Reporter:  &fakeReporter{},
 		TargetSHA: "def456",
 		Now:       func() time.Time { return fixedRunTime },
@@ -196,7 +197,7 @@ func TestPostGitHubStatusReturnsReporterError(t *testing.T) {
 	reporter := &fakeReporter{err: fmt.Errorf("boom")}
 	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
 
-	err = postAggregateStatus(context.Background(), reporter, &appender, meta, ghstatus.StatePending, fixedRunTime)
+	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, fixedRunTime)
 	if err == nil {
 		t.Fatal("expected error")
 	}

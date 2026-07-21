@@ -12,14 +12,16 @@ import (
 )
 
 const (
-	aggregateDescriptionRunning = "local verification running"
-	aggregateDescriptionPassed  = "local verification passed"
-	aggregateDescriptionFailed  = "local verification failed"
-	stepDescriptionRunning      = "running"
-	stepDescriptionPassed       = "passed"
-	stepDescriptionFailed       = "failed"
-	stepDescriptionSkipped      = "skipped"
-	stepDescriptionBlocked      = "blocked"
+	aggregateDescriptionRunning     = "local verification running"
+	aggregateDescriptionPassed      = "local verification passed"
+	aggregateDescriptionFailed      = "local verification failed"
+	aggregateDescriptionInterrupted = "local verification interrupted"
+	stepDescriptionRunning          = "running"
+	stepDescriptionPassed           = "passed"
+	stepDescriptionFailed           = "failed"
+	stepDescriptionInterrupted      = "interrupted"
+	stepDescriptionSkipped          = "skipped"
+	stepDescriptionBlocked          = "blocked"
 )
 
 func validateReporter(meta persistence.Meta, reporter ghstatus.Reporter) error {
@@ -107,6 +109,7 @@ func postGitHubStatus(
 ) error {
 	target := ghstatus.Target{Repo: meta.RepoSlug, SHA: meta.HeadSHA}
 	if err := reporter.PostStatus(ctx, target, status); err != nil {
+		// Preserve the reporting error if recording its diagnostic event also fails.
 		_ = appender.Append(at, events.GitHubStatusFailed, stepID, string(status.State), githubEventMessage(status))
 		return fmt.Errorf("post GitHub status %s: %w", githubEventMessage(status), err)
 	}
@@ -122,6 +125,8 @@ func aggregateGitHubState(runStatus string) ghstatus.State {
 		return ghstatus.StateSuccess
 	case runStatusPending, string(StepStateRunning):
 		return ghstatus.StatePending
+	case string(StepStateInterrupted):
+		return ghstatus.StateError
 	default:
 		return ghstatus.StateFailure
 	}
@@ -133,6 +138,8 @@ func aggregateDescription(state ghstatus.State) string {
 		return aggregateDescriptionPassed
 	case ghstatus.StatePending:
 		return aggregateDescriptionRunning
+	case ghstatus.StateError:
+		return aggregateDescriptionInterrupted
 	default:
 		return aggregateDescriptionFailed
 	}
@@ -144,6 +151,8 @@ func stepGitHubState(stepState string) ghstatus.State {
 		return ghstatus.StateSuccess
 	case string(StepStatePending), string(StepStateRunning), string(StepStateStale):
 		return ghstatus.StatePending
+	case string(StepStateInterrupted):
+		return ghstatus.StateError
 	default:
 		return ghstatus.StateFailure
 	}
@@ -157,6 +166,8 @@ func stepDescription(stepState string) string {
 		return stepDescriptionSkipped
 	case string(StepStateBlocked):
 		return stepDescriptionBlocked
+	case string(StepStateInterrupted):
+		return stepDescriptionInterrupted
 	case string(StepStatePending), string(StepStateRunning), string(StepStateStale):
 		return stepDescriptionRunning
 	default:

@@ -18,16 +18,22 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
 
+const finalReportTimeout = 5 * time.Second
+
+// ExecuteOptions configures one run execution.
 type ExecuteOptions struct {
-	Context  context.Context
-	Now      func() time.Time
-	Reporter ghstatus.Reporter
-	Stdout   io.Writer
-	Stderr   io.Writer
-	Progress io.Writer
+	// ForceStop requests immediate process-group termination when closed.
+	ForceStop <-chan struct{}
+	Now       func() time.Time
+	Reporter  ghstatus.Reporter
+	Stdout    io.Writer
+	Stderr    io.Writer
+	Progress  io.Writer
 }
 
-func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (RunRecord, error) {
+// ExecuteRun executes unfinished plan steps and persists their lifecycle.
+// If ctx is canceled during a step, ExecuteRun finalizes and returns an interrupted run.
+func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opts ExecuteOptions) (RunRecord, error) {
 	if err := validateStoredStepStatuses(run.Plan, run.StepStatuses); err != nil {
 		return RunRecord{}, err
 	}
@@ -46,8 +52,7 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 	}
 
 	now := resolveNow(opts.Now)
-	ctx := resolveContext(opts.Context)
-	stdout, stderr, progress := resolveWriters(opts)
+	stdout, stderr, progress := opts.Stdout, opts.Stderr, opts.Progress
 	if err := validateReporter(run.Meta, opts.Reporter); err != nil {
 		return RunRecord{}, err
 	}
@@ -69,7 +74,7 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 	if err := appender.Append(runStartedAt, events.RunStarted, "", runStatusPending, ""); err != nil {
 		return RunRecord{}, err
 	}
-	if err := postAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, ghstatus.StatePending, runStartedAt); err != nil {
+	if err := postPendingAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, runStartedAt); err != nil {
 		return RunRecord{}, err
 	}
 
@@ -79,6 +84,12 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 		}
 
 		step := run.Plan.Steps[stepIndex]
+		if ctx.Err() != nil {
+			if err := executeStep(ctx, opts.ForceStop, store, &run, stepIndex, step, now, &appender, opts.Reporter, stdout, stderr, progress); err != nil {
+				return RunRecord{}, err
+			}
+			break
+		}
 		if shouldSkipStep(step) {
 			at := now()
 			printProgress(progress, "skip %s (condition=false)\n", step.ID)
@@ -92,7 +103,7 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 			if err := appender.Append(at, events.StepSkipped, step.ID, string(StepStateSkipped), "condition=false"); err != nil {
 				return RunRecord{}, err
 			}
-			if err := postStepTerminalStatus(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at); err != nil {
+			if err := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at); err != nil {
 				return RunRecord{}, err
 			}
 			continue
@@ -111,14 +122,17 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 			if err := appender.Append(at, events.StepBlocked, step.ID, string(StepStateBlocked), message); err != nil {
 				return RunRecord{}, err
 			}
-			if err := postStepTerminalStatus(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at); err != nil {
+			if err := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at); err != nil {
 				return RunRecord{}, err
 			}
 			continue
 		}
 
-		if err := executeStep(ctx, store, &run, stepIndex, step, now, &appender, opts.Reporter, stdout, stderr, progress); err != nil {
+		if err := executeStep(ctx, opts.ForceStop, store, &run, stepIndex, step, now, &appender, opts.Reporter, stdout, stderr, progress); err != nil {
 			return RunRecord{}, err
+		}
+		if run.StepStatuses[stepIndex].State == string(StepStateInterrupted) {
+			break
 		}
 	}
 
@@ -134,7 +148,7 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 	if err := appender.Append(finishedAt, events.RunFinished, "", run.Summary.Status, ""); err != nil {
 		return RunRecord{}, err
 	}
-	if err := postAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt); err != nil {
+	if err := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt); err != nil {
 		return RunRecord{}, err
 	}
 
@@ -143,6 +157,7 @@ func ExecuteRun(store persistence.Store, run RunRecord, opts ExecuteOptions) (Ru
 
 func executeStep(
 	ctx context.Context,
+	forceStop <-chan struct{},
 	store persistence.Store,
 	run *RunRecord,
 	stepIndex int,
@@ -169,11 +184,11 @@ func executeStep(
 	if err := appender.Append(startedAt, events.StepStarted, step.ID, string(StepStateRunning), ""); err != nil {
 		return err
 	}
-	if err := postStepPendingStatus(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], startedAt); err != nil {
+	if err := postStepPendingStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], startedAt); err != nil {
 		return err
 	}
 
-	runErr, exitCode, message := runProcess(ctx, store, *run, stepIndex, step, stdout, stderr)
+	runErr, exitCode, message := runProcess(ctx, forceStop, store, *run, stepIndex, step, stdout, stderr)
 	if runErr == nil {
 		if _, envErr := persistence.ReadEnvFile(store.StepFile(run.RunID, stepIndex, step.ID, persistence.OutputEnv)); envErr != nil {
 			runErr = envErr
@@ -182,9 +197,12 @@ func executeStep(
 	}
 
 	finishedAt := now()
-	state := StepStateSuccess
+	state := classifyStepState(ctx, runErr)
+	if state == StepStateInterrupted {
+		exitCode = nil
+		message = getInterruptionMessage(ctx)
+	}
 	if runErr != nil {
-		state = StepStateFailure
 		if message == "" {
 			message = runErr.Error()
 		}
@@ -205,18 +223,18 @@ func executeStep(
 	if err := appender.Append(finishedAt, events.StepFinished, step.ID, string(state), message); err != nil {
 		return err
 	}
-	if err := postStepTerminalStatus(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], finishedAt); err != nil {
+	if err := postStepTerminalStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], finishedAt); err != nil {
 		return err
 	}
 	printProgress(progress, "%s %s\n", stateLabel(state), step.ID)
-	if state == StepStateFailure {
+	if state == StepStateFailure || state == StepStateInterrupted {
 		printProgress(progress, "log %s\n", store.StepFile(run.RunID, stepIndex, step.ID, persistence.CombinedLog))
 	}
 
 	return nil
 }
 
-func runProcess(ctx context.Context, store persistence.Store, run RunRecord, stepIndex int, step config.Step, stdout io.Writer, stderr io.Writer) (error, *int, string) {
+func runProcess(ctx context.Context, forceStop <-chan struct{}, store persistence.Store, run RunRecord, stepIndex int, step config.Step, stdout io.Writer, stderr io.Writer) (error, *int, string) {
 	stdoutPath := store.StepFile(run.RunID, stepIndex, step.ID, persistence.StdoutLog)
 	stderrPath := store.StepFile(run.RunID, stepIndex, step.ID, persistence.StderrLog)
 	combinedPath := store.StepFile(run.RunID, stepIndex, step.ID, persistence.CombinedLog)
@@ -248,6 +266,8 @@ func runProcess(ctx context.Context, store persistence.Store, run RunRecord, ste
 	cmd.Env = stepEnv(run, stepIndex, step)
 	cmd.Stdout = multiWriter(stdoutFile, combinedFile, stdout)
 	cmd.Stderr = multiWriter(stderrFile, combinedFile, stderr)
+	removeProcessCancellation := addProcessCancellation(ctx, cmd, forceStop)
+	defer removeProcessCancellation()
 
 	err = cmd.Run()
 	switch {
@@ -262,6 +282,100 @@ func runProcess(ctx context.Context, store persistence.Store, run RunRecord, ste
 		}
 		return err, nil, err.Error()
 	}
+}
+
+func classifyStepState(runContext context.Context, runError error) StepState {
+	if runError == nil {
+		return StepStateSuccess
+	}
+	if runContext.Err() != nil {
+		return StepStateInterrupted
+	}
+	return StepStateFailure
+}
+
+func getInterruptionMessage(runContext context.Context) string {
+	if interruptionCause := context.Cause(runContext); interruptionCause != nil {
+		return interruptionCause.Error()
+	}
+	return "run interrupted"
+}
+
+func postPendingAggregateStatus(
+	runContext context.Context,
+	reporter ghstatus.Reporter,
+	appender *events.Appender,
+	meta persistence.Meta,
+	at time.Time,
+) error {
+	if runContext.Err() != nil {
+		return nil
+	}
+	postError := postAggregateStatus(runContext, reporter, appender, meta, ghstatus.StatePending, at)
+	if postError != nil && runContext.Err() != nil {
+		return nil
+	}
+	return postError
+}
+
+func postStepPendingStatusDuringRun(
+	runContext context.Context,
+	reporter ghstatus.Reporter,
+	appender *events.Appender,
+	meta persistence.Meta,
+	status persistence.StepStatus,
+	at time.Time,
+) error {
+	if runContext.Err() != nil {
+		return nil
+	}
+	postError := postStepPendingStatus(runContext, reporter, appender, meta, status, at)
+	if postError != nil && runContext.Err() != nil {
+		return nil
+	}
+	return postError
+}
+
+func postStepTerminalStatusDuringRun(
+	runContext context.Context,
+	reporter ghstatus.Reporter,
+	appender *events.Appender,
+	meta persistence.Meta,
+	status persistence.StepStatus,
+	at time.Time,
+) error {
+	return postTerminalStatusDuringRun(runContext, func(reportContext context.Context) error {
+		return postStepTerminalStatus(reportContext, reporter, appender, meta, status, at)
+	})
+}
+
+func postFinalAggregateStatus(
+	runContext context.Context,
+	reporter ghstatus.Reporter,
+	appender *events.Appender,
+	meta persistence.Meta,
+	state ghstatus.State,
+	at time.Time,
+) error {
+	return postTerminalStatusDuringRun(runContext, func(reportContext context.Context) error {
+		return postAggregateStatus(reportContext, reporter, appender, meta, state, at)
+	})
+}
+
+func postTerminalStatusDuringRun(runContext context.Context, postStatus func(context.Context) error) error {
+	if runContext.Err() == nil {
+		postError := postStatus(runContext)
+		if postError == nil || runContext.Err() == nil {
+			return postError
+		}
+	}
+
+	// Terminal reporting must outlive canceled work but must not hang shutdown.
+	reportContext, cancelReport := context.WithTimeout(context.WithoutCancel(runContext), finalReportTimeout)
+	defer cancelReport()
+	// Local artifacts are already terminal; external reporting is best effort after cancellation.
+	_ = postStatus(reportContext)
+	return nil
 }
 
 func executionOrder(plan config.ResolvedPlan) ([]int, error) {
@@ -318,17 +432,6 @@ func blockedByDependencies(statuses []persistence.StepStatus, needs []string) (b
 
 func shouldSkipStep(step config.Step) bool {
 	return step.If == "false"
-}
-
-func resolveContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
-	}
-	return context.Background()
-}
-
-func resolveWriters(opts ExecuteOptions) (io.Writer, io.Writer, io.Writer) {
-	return opts.Stdout, opts.Stderr, opts.Progress
 }
 
 func resolveNow(now func() time.Time) func() time.Time {

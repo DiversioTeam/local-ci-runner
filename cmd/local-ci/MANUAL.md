@@ -191,7 +191,7 @@ Use it to answer quickly:
 - did the run pass?
 - did it run on a dirty worktree?
 - what exact tree snapshot produced it?
-- which step failed?
+- which step failed or was interrupted?
 - which exact log path should I open next?
 
 #### `events.jsonl`
@@ -209,7 +209,7 @@ Use it when the plan itself looks wrong.
 Step status facts.
 
 Use it to answer:
-- running, success, failure, skipped, blocked, or stale?
+- running, success, failure, interrupted, skipped, blocked, or stale?
 - start and finish times?
 - log file locations?
 
@@ -324,7 +324,9 @@ Purpose:
 Important behavior:
 - child stdout and stderr stream live
 - runner progress lines are separate from persisted raw step logs
-- on step failure, the CLI prints the exact combined log path
+- on step failure or interruption, the CLI prints the exact combined log path
+- SIGINT or SIGTERM stops the active step, including its process group on macOS and Linux, and finishes the run as `interrupted`
+- interrupted GitHub step and aggregate contexts are posted as `error`
 - `--no-github` disables GitHub status posting for that execution
 
 Examples:
@@ -348,6 +350,7 @@ Purpose:
 Important behavior:
 - resume is strict and fail-closed
 - it refuses to continue if repo identity, SHA, config hash, or plan hash changed
+- interrupted and otherwise unfinished steps rerun while prior successful steps are reused
 - `--no-github` disables GitHub status posting for that execution
 
 Examples:
@@ -379,6 +382,7 @@ Columns:
 Important behavior:
 - newest first
 - active runs appear as active, not as malformed finished runs
+- a dead recorded runner PID is displayed as `(dead)` without changing stored artifacts
 
 Examples:
 
@@ -402,7 +406,7 @@ This is the main debugging entrypoint.
 
 Important behavior:
 - reads persisted artifacts only
-- shows the stored runner PID for active runs when known
+- shows the stored runner PID for active runs when known and flags a dead recorded PID
 - shows the stored snapshot details for the run
 - does not attach to the process
 - works from another shell while the run is still active
@@ -458,6 +462,7 @@ Important behavior:
 - requires the current `HEAD^{tree}` to exactly match the stored run snapshot
 - requires the current config and resolved plan to still match the stored run
 - refuses to republish a run that already posted during execution
+- refuses to publish an interrupted run until it is resumed successfully
 - refuses to publish if the code, config, or resolved plan changed after the run
 
 Examples:
@@ -536,6 +541,7 @@ Each entry includes:
 - `run_id`
 - `run_dir`
 - `status`
+- `runner_pid` and advisory `runner_alive` for unfinished runs when known
 - `started_at`
 - `finished_at`
 - `duration_millis`
@@ -547,6 +553,7 @@ Returns one snapshot object.
 
 It includes:
 - top-level run identity
+- advisory `runner_alive` for an unfinished run when known
 - `meta`
 - `summary`
 - `steps`
@@ -622,6 +629,13 @@ partial tail   -> ignore it for now
 
 That makes active-run inspection stable from another shell.
 
+### Dead runner PIDs
+
+For unfinished runs, `runs` and `show` check whether the stored runner PID is
+still alive when the platform supports it. This is advisory only: PIDs can be
+reused, and read commands never rewrite a run or post GitHub status. SIGKILL,
+process crashes, and power loss cannot execute interruption finalization.
+
 ---
 
 ## 10. Debugging playbooks
@@ -634,12 +648,13 @@ local-ci show <run-id>
 local-ci logs <run-id>
 ```
 
-### The run failed and I need the fastest next step
+### The run failed or was interrupted and I need the fastest next step
 
 ```bash
 local-ci show <run-id>
 local-ci logs <run-id>
-local-ci logs <run-id> --step <failing-step-id>
+local-ci logs <run-id> --step <failing-or-interrupted-step-id>
+local-ci resume <run-id>
 ```
 
 ### The planner seems wrong
@@ -701,6 +716,7 @@ That is by design.
 Why:
 - reusing old success across a new SHA or plan is unsafe
 - fail-closed is smaller and safer than clever reuse logic
+- an interrupted step is unfinished and is rerun when identity still matches
 
 ### Inspection is intentionally tolerant
 
@@ -710,6 +726,15 @@ That is also by design.
 Why:
 - showing a useful active-run snapshot is better than failing on a temporary cross-file timing gap
 - read-only commands do not mutate state, so this tolerance is low risk
+
+### Interruption is finalized by the engine
+
+The CLI turns SIGINT and SIGTERM into cancellation of the run context. The
+engine stops the active step, including its process group on macOS and Linux,
+persists `interrupted` step and run states, appends `run.finished`, and attempts
+terminal GitHub `error` statuses with a fresh bounded context. The first signal
+starts graceful run finalization; a second hard-stops active process groups.
+Signal handlers do not write artifacts themselves.
 
 ### `run` still requires a real `HEAD`
 

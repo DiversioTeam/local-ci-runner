@@ -11,8 +11,8 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
 
+// PublishOptions configures publication of a stored run.
 type PublishOptions struct {
-	Context   context.Context
 	Now       func() time.Time
 	Reporter  ghstatus.Reporter
 	TargetSHA string
@@ -23,7 +23,7 @@ type PublishOptions struct {
 //
 // This is for the dirty-worktree flow: run locally without posting, commit the
 // exact same snapshot, then publish the already-computed result to GitHub.
-func PublishCompletedRun(store persistence.Store, run RunRecord, opts PublishOptions) error {
+func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRecord, opts PublishOptions) error {
 	if err := validateStoredStepStatuses(run.Plan, run.StepStatuses); err != nil {
 		return err
 	}
@@ -33,14 +33,17 @@ func PublishCompletedRun(store persistence.Store, run RunRecord, opts PublishOpt
 	if !run.Meta.GitHubEnabled {
 		return fmt.Errorf("GitHub posting was disabled for this run")
 	}
+	if run.Meta.FinishedAt == nil || run.Summary.Status == runStatusPending {
+		return fmt.Errorf("run %s has not finished yet", run.RunID)
+	}
+	if run.Summary.Status == string(StepStateInterrupted) {
+		return fmt.Errorf("run %s was interrupted", run.RunID)
+	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
 		return fmt.Errorf("run %s already posted during execution", run.RunID)
 	}
 	if strings.TrimSpace(opts.TargetSHA) == "" {
 		return fmt.Errorf("target SHA is required")
-	}
-	if run.Meta.FinishedAt == nil || run.Summary.Status == runStatusPending {
-		return fmt.Errorf("run %s has not finished yet", run.RunID)
 	}
 	meta := run.Meta
 	meta.HeadSHA = opts.TargetSHA
@@ -53,7 +56,6 @@ func PublishCompletedRun(store persistence.Store, run RunRecord, opts PublishOpt
 	if err != nil {
 		return err
 	}
-	ctx := resolveContext(opts.Context)
 	now := resolveNow(opts.Now)
 	at := now()
 

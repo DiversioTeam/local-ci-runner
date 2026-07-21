@@ -25,11 +25,12 @@ The runner understands processes and files. Consumer repos own the actual verifi
    - static `[[steps]]`, or
    - planner stdout JSON
 5. Persist `plan.json` and `plan.env`.
-6. Execute steps in dependency order.
-7. Persist per-step status and logs.
-8. Append lifecycle events to `events.jsonl`.
-9. Post step and aggregate GitHub statuses.
-10. Write `summary.json` and `summary.txt`.
+6. Execute steps in dependency order under one run context.
+7. On SIGINT/SIGTERM, cancel that context and stop the active step, including its process group on macOS and Linux.
+8. Persist per-step status and logs.
+9. Append lifecycle events to `events.jsonl`.
+10. Post step and aggregate GitHub statuses.
+11. Write `summary.json` and `summary.txt`.
 
 ### Read path
 
@@ -43,6 +44,11 @@ local-ci logs <run-id>       -> render runner, planner, or step logs
 ```
 
 This split is intentional.
+
+Signal handling follows the same ownership rule:
+- the CLI translates process-wide SIGINT/SIGTERM into run-context cancellation
+- the engine owns process shutdown and all final persisted writes
+- a signal goroutine never writes run artifacts
 
 Why:
 - the engine can stay strict about persisted state and resume safety
@@ -82,4 +88,13 @@ Resume must fail closed if any of these changed:
 - planner output hash
 
 The runner can reuse prior successful steps only inside the same immutable run identity.
+Interrupted and otherwise unfinished steps are rerun.
+
+## Future parallel execution
+
+The run context is a broadcast boundary. Future independent step goroutines will
+all derive their step contexts from it, so one cancellation reaches every active
+worker. Each worker owns one process group and isolated log files. The scheduler
+remains the single writer for statuses, summaries, events, and aggregate GitHub
+state; step failures are results and must not cancel independent siblings.
 

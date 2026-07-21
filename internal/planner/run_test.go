@@ -2,6 +2,7 @@ package planner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ func TestExecutePlanner(t *testing.T) {
 	script := "#!/bin/sh\nprintf 'planner-log\\n' >&2\ncat <<'JSON'\n{\"env\":{\"CHANGED_SCOPE\":\"python\"},\"steps\":[{\"id\":\"lint\",\"command\":[\"/bin/sh\",\"-c\",\"printf \\\"%s %s\\\\n\\\" \\\"$LOCAL_CI_GITHUB_REPO\\\" \\\"$LOCAL_CI_GITHUB_SHA\\\"\"]}]}\nJSON\n"
 	writeExecutable(t, scriptPath, script)
 
-	result, err := Execute(context.Background(), repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
+	result, err := Execute(t.Context(), repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -36,6 +37,22 @@ func TestExecutePlanner(t *testing.T) {
 	}
 }
 
+func TestExecutePlannerReturnsCancellationCause(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	scriptPath := filepath.Join(repoRoot, "planner.sh")
+	writeExecutable(t, scriptPath, "#!/bin/sh\nexit 0\n")
+	cancellationCause := errors.New("stop planner")
+	plannerContext, cancelPlanner := context.WithCancelCause(t.Context())
+	cancelPlanner(cancellationCause)
+
+	_, err := Execute(plannerContext, repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
+	if !errors.Is(err, cancellationCause) {
+		t.Fatalf("Execute() error = %v, want %v", err, cancellationCause)
+	}
+}
+
 func TestExecutePlannerRejectsInvalidOutput(t *testing.T) {
 	t.Parallel()
 
@@ -43,7 +60,7 @@ func TestExecutePlannerRejectsInvalidOutput(t *testing.T) {
 	scriptPath := filepath.Join(repoRoot, "planner.sh")
 	writeExecutable(t, scriptPath, "#!/bin/sh\nprintf 'not-json\\n'\n")
 
-	_, err := Execute(context.Background(), repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
+	_, err := Execute(t.Context(), repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
 	if err == nil {
 		t.Fatal("expected error")
 	}

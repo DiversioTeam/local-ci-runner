@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -12,6 +13,9 @@ import (
 )
 
 const runStatusPending = "pending"
+
+// ErrStoredSummaryMismatch reports disagreement between summary.json and its source artifacts.
+var ErrStoredSummaryMismatch = errors.New("stored summary mismatch")
 
 type PrepareOptions struct {
 	Identity                RunIdentity
@@ -393,6 +397,13 @@ func validateStepStateSemantics(status persistence.StepStatus, stepID string) er
 		if status.StartedAt == nil || status.FinishedAt == nil {
 			return fmt.Errorf("stored failed step state requires start and finish times for %q", stepID)
 		}
+	case string(StepStateInterrupted):
+		if status.StartedAt == nil || status.FinishedAt == nil {
+			return fmt.Errorf("stored interrupted step state requires start and finish times for %q", stepID)
+		}
+		if status.ExitCode != nil {
+			return fmt.Errorf("stored interrupted step state must not contain an exit code for %q", stepID)
+		}
 	case string(StepStateSkipped), string(StepStateBlocked):
 		if status.StartedAt == nil || status.FinishedAt == nil {
 			return fmt.Errorf("stored %s step state requires start and finish times for %q", status.State, stepID)
@@ -412,22 +423,22 @@ func validateStepStateSemantics(status persistence.StepStatus, stepID string) er
 func validateStoredSummary(meta persistence.Meta, summary persistence.Summary, statuses []persistence.StepStatus) error {
 	expected := buildSummary(meta.RunID, statuses, meta.StartedAt, meta.FinishedAt)
 	if summary.RunID != expected.RunID {
-		return fmt.Errorf("stored summary run id does not match run metadata")
+		return fmt.Errorf("%w: run id does not match run metadata", ErrStoredSummaryMismatch)
 	}
 	if summary.Status != expected.Status {
-		return fmt.Errorf("stored summary status does not match step statuses")
+		return fmt.Errorf("%w: status does not match step statuses", ErrStoredSummaryMismatch)
 	}
 	if !sameTime(summary.StartedAt, expected.StartedAt) || !sameTime(summary.FinishedAt, expected.FinishedAt) {
-		return fmt.Errorf("stored summary timestamps do not match run metadata")
+		return fmt.Errorf("%w: timestamps do not match run metadata", ErrStoredSummaryMismatch)
 	}
 	if summary.DurationMillis != expected.DurationMillis {
-		return fmt.Errorf("stored summary duration does not match run metadata")
+		return fmt.Errorf("%w: duration does not match run metadata", ErrStoredSummaryMismatch)
 	}
 	if !sameStepSummaries(summary.Steps, expected.Steps) {
-		return fmt.Errorf("stored summary steps do not match step statuses")
+		return fmt.Errorf("%w: steps do not match step statuses", ErrStoredSummaryMismatch)
 	}
 	if !sameCounts(summary.Counts, expected.Counts) {
-		return fmt.Errorf("stored summary counts do not match step statuses")
+		return fmt.Errorf("%w: counts do not match step statuses", ErrStoredSummaryMismatch)
 	}
 
 	return nil
@@ -445,9 +456,14 @@ func buildSummary(runID string, statuses []persistence.StepStatus, startedAt *ti
 		})
 	}
 
+	runStatus := summarizeRunStatus(counts)
+	if finishedAt != nil && counts[string(StepStateInterrupted)] > 0 {
+		runStatus = string(StepStateInterrupted)
+	}
+
 	summary := persistence.Summary{
 		RunID:      runID,
-		Status:     summarizeRunStatus(counts),
+		Status:     runStatus,
 		StartedAt:  startedAt,
 		FinishedAt: finishedAt,
 		Steps:      stepSummaries,
@@ -464,7 +480,7 @@ func summarizeRunStatus(counts map[string]int) string {
 	switch {
 	case len(counts) == 0:
 		return string(StepStateSuccess)
-	case counts[string(StepStatePending)] > 0 || counts[string(StepStateRunning)] > 0:
+	case counts[string(StepStatePending)] > 0 || counts[string(StepStateRunning)] > 0 || counts[string(StepStateInterrupted)] > 0:
 		return runStatusPending
 	case counts[string(StepStateFailure)] > 0:
 		return string(StepStateFailure)
@@ -596,7 +612,7 @@ func renderSummaryText(runDir string, meta persistence.Meta, summary persistence
 	builder.WriteString("failure_points:\n")
 	wroteFailure := false
 	for _, status := range statuses {
-		if status.State != string(StepStateFailure) && status.State != string(StepStateBlocked) && status.State != string(StepStateStale) {
+		if status.State != string(StepStateFailure) && status.State != string(StepStateInterrupted) && status.State != string(StepStateBlocked) && status.State != string(StepStateStale) {
 			continue
 		}
 		wroteFailure = true
@@ -668,7 +684,7 @@ func cloneStepStatus(status persistence.StepStatus) persistence.StepStatus {
 
 func isKnownStepState(state string) bool {
 	switch state {
-	case string(StepStatePending), string(StepStateRunning), string(StepStateSuccess), string(StepStateFailure), string(StepStateSkipped), string(StepStateBlocked), string(StepStateStale):
+	case string(StepStatePending), string(StepStateRunning), string(StepStateSuccess), string(StepStateFailure), string(StepStateInterrupted), string(StepStateSkipped), string(StepStateBlocked), string(StepStateStale):
 		return true
 	default:
 		return false

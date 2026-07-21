@@ -2,12 +2,14 @@ package gitrepo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type WorktreeFileStatus string
@@ -46,8 +48,6 @@ type Info struct {
 }
 
 func DiscoverRoot(ctx context.Context, startDir string) (string, error) {
-	ctx = resolveContext(ctx)
-
 	root, err := gitOutput(ctx, startDir, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", err
@@ -61,16 +61,15 @@ func DiscoverRoot(ctx context.Context, startDir string) (string, error) {
 }
 
 func Discover(ctx context.Context, startDir string) (Info, error) {
-	ctx = resolveContext(ctx)
-
 	absRoot, err := DiscoverRoot(ctx, startDir)
 	if err != nil {
 		return Info{}, err
 	}
 
-	headSHA, err := gitOutput(ctx, absRoot, "rev-parse", "HEAD")
+	headSHA, err := gitOutput(ctx, absRoot, "rev-parse", "--verify", "--quiet", "HEAD")
 	if err != nil {
-		if strings.Contains(err.Error(), "unknown revision") || strings.Contains(err.Error(), "ambiguous argument 'HEAD'") {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
 			return Info{}, fmt.Errorf("git repo has no commits; create an initial commit before running local-ci")
 		}
 		return Info{}, err
@@ -169,11 +168,15 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 func gitOutputWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
+	cmd.WaitDelay = time.Second
 	if env != nil {
 		cmd.Env = env
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), context.Cause(ctx))
+		}
 		message := strings.TrimSpace(string(output))
 		if message == "" {
 			return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
@@ -338,11 +341,4 @@ func nonEmptyLines(text string) []string {
 		result = append(result, strings.TrimSpace(line))
 	}
 	return result
-}
-
-func resolveContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
-	}
-	return context.Background()
 }

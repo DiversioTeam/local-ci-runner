@@ -88,6 +88,7 @@ For each step the engine will:
 - create `.local-ci/runs/<run-id>/steps/<nnn-step-id>/`
 - set engine-provided env vars
 - execute the step command directly without forcing a shell
+- run the command in its own process group on macOS and Linux
 - capture `stdout.log`, `stderr.log`, and `combined.log`
 - persist terminal state in `status.json`
 - optionally persist `output.env`
@@ -173,11 +174,16 @@ Stores per-step execution facts:
 Canonical terminal states:
 - `success`
 - `failure`
+- `interrupted`
 - `skipped`
 - `blocked`
 - `stale`
 
 Transient runtime phases like `pending` and `running` are allowed in memory and events.
+
+`interrupted` means SIGINT or SIGTERM canceled step execution. The run records
+a finish time, leaves work that never started as `pending`, and reruns all
+non-successful work on `resume`.
 
 ### `summary.txt`
 
@@ -210,6 +216,10 @@ So the inspection contract is:
 - try the strict loader first
 - retry briefly
 - if only the summary is behind, build a best-effort read-only snapshot from persisted step facts
+- report whether an unfinished run's recorded PID is alive when the platform can determine it
+
+A dead PID is advisory inspection output. Read commands do not rewrite the run
+or post a GitHub status, and PID reuse means liveness is not durable run state.
 
 Resume does **not** use that fallback. Resume stays fail-closed.
 
@@ -287,7 +297,13 @@ Never a parent repo, sibling worktree, cached stale SHA, or a commit whose tree 
 
 - aggregate: `pending` at run start, terminal at run end
 - step: `pending` before execution, terminal on completion
+- interrupted step and aggregate contexts post GitHub state `error`
+- final interruption posts use a fresh bounded context because the execution context is already canceled
 - rerun-from-step must refresh affected step contexts and the aggregate context
+
+On the first SIGINT or SIGTERM, the runner cancels the run and gives each active
+process group a short grace period. A second signal requests an immediate hard
+stop. Final artifact writes remain owned by the engine, not the signal handler.
 
 ## 7. Non-goals
 

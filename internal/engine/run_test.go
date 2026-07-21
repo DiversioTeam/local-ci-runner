@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -330,8 +331,8 @@ func TestLoadRunRejectsSummaryDrift(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "stored summary status does not match step statuses") {
-		t.Fatalf("error = %v", err)
+	if !errors.Is(err, ErrStoredSummaryMismatch) {
+		t.Fatalf("LoadRun() error = %v, want ErrStoredSummaryMismatch", err)
 	}
 }
 

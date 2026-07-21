@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
 )
@@ -27,8 +28,6 @@ func Execute(
 	configPath string,
 	plannerConfig config.Planner,
 ) (Result, error) {
-	ctx = resolveContext(ctx)
-
 	command, err := resolveCommand(plannerConfig.Command)
 	if err != nil {
 		return Result{}, err
@@ -37,6 +36,7 @@ func Execute(
 
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = workingDir
+	cmd.WaitDelay = time.Second
 	cmd.Env = plannerEnv(repoRoot, repoSlug, headSHA, configPath, plannerConfig.Env)
 
 	var stdout bytes.Buffer
@@ -45,6 +45,9 @@ func Execute(
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return Result{}, fmt.Errorf("run planner: %w", context.Cause(ctx))
+		}
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
 			message = strings.TrimSpace(stdout.String())
@@ -116,11 +119,4 @@ func plannerEnv(repoRoot string, repoSlug string, headSHA string, configPath str
 		result = append(result, key+"="+env[key])
 	}
 	return result
-}
-
-func resolveContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
-	}
-	return context.Background()
 }

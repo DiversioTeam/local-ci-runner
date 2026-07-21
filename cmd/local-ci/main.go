@@ -27,13 +27,26 @@ import (
 var errRunFailed = errors.New("run finished unsuccessfully")
 
 func main() {
-	if err := newCLI(os.Stdout, os.Stderr, ".").run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "local-ci:", err)
-		if errors.Is(err, errRunFailed) {
-			os.Exit(1)
-		}
-		os.Exit(2)
+	commandContext, forceStop, removeNotifications := getTerminationControl(context.Background())
+	runError := newCLI(os.Stdout, os.Stderr, ".").runWithContext(commandContext, forceStop, os.Args[1:])
+	removeNotifications()
+	// A late signal changes a successful exit, but must not hide an engine or
+	// persistence error.
+	if runError == nil {
+		runError = getTerminationError(commandContext)
 	}
+	if runError == nil {
+		return
+	}
+	if exitCode, interrupted := getTerminationExitCode(runError); interrupted {
+		os.Exit(exitCode)
+	}
+
+	fmt.Fprintln(os.Stderr, "local-ci:", runError)
+	if errors.Is(runError, errRunFailed) {
+		os.Exit(1)
+	}
+	os.Exit(2)
 }
 
 type cli struct {
@@ -79,6 +92,7 @@ type runListEntry struct {
 	RunDir         string     `json:"run_dir"`
 	Status         string     `json:"status"`
 	RunnerPID      *int       `json:"runner_pid,omitempty"`
+	RunnerAlive    *bool      `json:"runner_alive,omitempty"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	DurationMillis *int64     `json:"duration_millis,omitempty"`
@@ -89,6 +103,7 @@ type showJSON struct {
 	RunID            string                   `json:"run_id"`
 	RunDir           string                   `json:"run_dir"`
 	Status           string                   `json:"status"`
+	RunnerAlive      *bool                    `json:"runner_alive,omitempty"`
 	Meta             persistence.Meta         `json:"meta"`
 	Summary          persistence.Summary      `json:"summary"`
 	Steps            []persistence.StepStatus `json:"steps"`
@@ -119,11 +134,11 @@ func newCLI(stdout io.Writer, stderr io.Writer, cwd string) *cli {
 	}
 }
 
-func (c *cli) maybePrintUpdateNotice() {
+func (c *cli) maybePrintUpdateNotice(parentContext context.Context) {
 	if !isTerminalWriter(c.stderr) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(parentContext, 1500*time.Millisecond)
 	defer cancel()
 	message, err := update.Checker{}.Notice(ctx)
 	if err != nil || message == "" {
@@ -137,7 +152,11 @@ func (c *cli) printVersion() {
 }
 
 func (c *cli) run(args []string) error {
-	c.maybePrintUpdateNotice()
+	return c.runWithContext(context.Background(), nil, args)
+}
+
+func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
+	c.maybePrintUpdateNotice(commandContext)
 	if len(args) == 0 {
 		c.printTopHelp()
 		return nil
@@ -168,37 +187,37 @@ func (c *cli) run(args []string) error {
 			c.printPublishHelp()
 			return nil
 		}
-		return c.publishCommand(args[1:])
+		return c.publishCommand(commandContext, args[1:])
 	case "run":
 		if hasHelpFlag(args[1:]) {
 			c.printRunHelp()
 			return nil
 		}
-		return c.runCommand(args[1:])
+		return c.runCommand(commandContext, forceStop, args[1:])
 	case "resume":
 		if hasHelpFlag(args[1:]) {
 			c.printResumeHelp()
 			return nil
 		}
-		return c.resumeCommand(args[1:])
+		return c.resumeCommand(commandContext, forceStop, args[1:])
 	case "runs":
 		if hasHelpFlag(args[1:]) {
 			c.printRunsHelp()
 			return nil
 		}
-		return c.runsCommand(args[1:])
+		return c.runsCommand(commandContext, args[1:])
 	case "show":
 		if hasHelpFlag(args[1:]) {
 			c.printShowHelp()
 			return nil
 		}
-		return c.showCommand(args[1:])
+		return c.showCommand(commandContext, args[1:])
 	case "logs":
 		if hasHelpFlag(args[1:]) {
 			c.printLogsHelp()
 			return nil
 		}
-		return c.logsCommand(args[1:])
+		return c.logsCommand(commandContext, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q (run 'local-ci --help')", args[0])
 	}
@@ -236,14 +255,13 @@ func (c *cli) helpCommand(args []string) error {
 	return nil
 }
 
-func (c *cli) runCommand(args []string) error {
+func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
 	opts, err := parseExecutionArgs(args, false)
 	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
-	repo, cfg, plan, plannerLog, identity, store, err := prepareContext(ctx, c.cwd, opts.configPath)
+	repo, cfg, plan, plannerLog, identity, store, err := prepareContext(commandContext, c.cwd, opts.configPath)
 	if err != nil {
 		return err
 	}
@@ -264,17 +282,16 @@ func (c *cli) runCommand(args []string) error {
 		return err
 	}
 
-	return c.executeAndReport(ctx, repo, cfg, store, runRecord, opts.noGitHub)
+	return c.executeAndReport(commandContext, forceStop, repo, cfg, store, runRecord, opts.noGitHub)
 }
 
-func (c *cli) resumeCommand(args []string) error {
+func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
 	opts, runID, err := parseExecutionAndRunIDArgs(args)
 	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
-	repo, cfg, _, _, identity, store, err := prepareContext(ctx, c.cwd, opts.configPath)
+	repo, cfg, _, _, identity, store, err := prepareContext(commandContext, c.cwd, opts.configPath)
 	if err != nil {
 		return err
 	}
@@ -284,33 +301,32 @@ func (c *cli) resumeCommand(args []string) error {
 	}
 	runRecord.Meta.GitHubPostingSuppressed = suppressedGitHubPostingReason(runRecord.Meta.GitHubPostingSuppressed, repo.DirtyWorktree, opts.noGitHub, cfg.GitHub.Enabled)
 
-	return c.executeAndReport(ctx, repo, cfg, store, runRecord, opts.noGitHub)
+	return c.executeAndReport(commandContext, forceStop, repo, cfg, store, runRecord, opts.noGitHub)
 }
 
-func (c *cli) publishCommand(args []string) error {
+func (c *cli) publishCommand(commandContext context.Context, args []string) error {
 	opts, err := parsePublishArgs(args)
 	if err != nil {
 		return err
 	}
 
-	repoRoot, store, err := c.readOnlyStore()
+	repoRoot, err := gitrepo.DiscoverRoot(commandContext, c.cwd)
 	if err != nil {
 		return err
 	}
+	store := persistence.NewStore(repoRoot)
 	run, err := engine.LoadRun(store, opts.runID)
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
-	repo, _, _, _, identity, _, err := prepareContext(ctx, repoRoot, run.Meta.ConfigPath)
+	repo, _, _, _, identity, _, err := prepareContext(commandContext, repoRoot, run.Meta.ConfigPath)
 	if err != nil {
 		return err
 	}
 	if err := validatePublishableRun(repo, identity, run); err != nil {
 		return err
 	}
-	if err := engine.PublishCompletedRun(store, run, engine.PublishOptions{
-		Context:   ctx,
+	if err := engine.PublishCompletedRun(commandContext, store, run, engine.PublishOptions{
 		Reporter:  ghstatus.CLIReporter{Token: os.Getenv(ghstatus.TokenEnvVar)},
 		TargetSHA: repo.HeadSHA,
 	}); err != nil {
@@ -320,13 +336,13 @@ func (c *cli) publishCommand(args []string) error {
 	return nil
 }
 
-func (c *cli) runsCommand(args []string) error {
+func (c *cli) runsCommand(commandContext context.Context, args []string) error {
 	opts, err := parseRunsArgs(args)
 	if err != nil {
 		return err
 	}
 
-	_, store, err := c.readOnlyStore()
+	store, err := c.readOnlyStore(commandContext)
 	if err != nil {
 		return err
 	}
@@ -347,6 +363,7 @@ func (c *cli) runsCommand(args []string) error {
 		}
 		entry.Status = displayRunStatus(run.Summary.Status, run.StepStatuses)
 		entry.RunnerPID = displayRunnerPID(run.Meta)
+		entry.RunnerAlive = getRunnerAlive(run.Meta)
 		entry.StartedAt = run.Meta.StartedAt
 		entry.FinishedAt = run.Meta.FinishedAt
 		entry.DurationMillis = durationPtr(run.Summary.DurationMillis, run.Meta.StartedAt, run.Meta.FinishedAt)
@@ -362,14 +379,17 @@ func (c *cli) runsCommand(args []string) error {
 		return nil
 	}
 
-	_, _ = fmt.Fprintf(c.stdout, "%-26s %-9s %-8s %-20s %-20s %s\n", "RUN ID", "STATUS", "PID", "STARTED", "FINISHED", "DURATION")
+	_, _ = fmt.Fprintf(c.stdout, "%-26s %-16s %-8s %-20s %-20s %s\n", "RUN ID", "STATUS", "PID", "STARTED", "FINISHED", "DURATION")
 	for _, entry := range entries {
 		statusText := entry.Status
 		if entry.Error != "" {
 			statusText = "error"
 		}
-		statusField := fmt.Sprintf("%-9s", statusText)
-		statusField = c.outStyles.status(statusField, statusText)
+		if entry.RunnerAlive != nil && !*entry.RunnerAlive {
+			statusText += " (dead)"
+		}
+		statusField := fmt.Sprintf("%-16s", statusText)
+		statusField = c.outStyles.status(statusField, entry.Status)
 		_, _ = fmt.Fprintf(
 			c.stdout,
 			"%-26s %s %-8s %-20s %-20s %s",
@@ -389,13 +409,13 @@ func (c *cli) runsCommand(args []string) error {
 	return nil
 }
 
-func (c *cli) showCommand(args []string) error {
+func (c *cli) showCommand(commandContext context.Context, args []string) error {
 	opts, err := parseShowArgs(args)
 	if err != nil {
 		return err
 	}
 
-	run, store, err := c.loadRun(opts.runID)
+	run, store, err := c.loadRun(commandContext, opts.runID)
 	if err != nil {
 		return err
 	}
@@ -409,6 +429,7 @@ func (c *cli) showCommand(args []string) error {
 			RunID:          run.RunID,
 			RunDir:         run.RunDir,
 			Status:         status,
+			RunnerAlive:    getRunnerAlive(run.Meta),
 			Meta:           run.Meta,
 			Summary:        run.Summary,
 			Steps:          run.StepStatuses,
@@ -430,7 +451,11 @@ func (c *cli) showCommand(args []string) error {
 	_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", run.RunDir)
 	_, _ = fmt.Fprintf(c.stdout, "started: %s\n", formatTime(run.Meta.StartedAt))
 	if pid := displayRunnerPID(run.Meta); pid != nil {
-		_, _ = fmt.Fprintf(c.stdout, "pid: %d\n", *pid)
+		_, _ = fmt.Fprintf(c.stdout, "pid: %d", *pid)
+		if runnerAlive := getRunnerAlive(run.Meta); runnerAlive != nil && !*runnerAlive {
+			_, _ = fmt.Fprint(c.stdout, " (dead)")
+		}
+		_, _ = fmt.Fprintln(c.stdout)
 	}
 	_, _ = fmt.Fprintf(c.stdout, "snapshot:\n  head_tree: %s\n  worktree_tree: %s\n  dirty_worktree: %t\n", run.Meta.HeadTreeHash, run.Meta.WorktreeTreeHash, run.Meta.DirtyWorktree)
 	if run.Meta.GitHubPostingSuppressed != "" {
@@ -490,7 +515,7 @@ func (c *cli) showCommand(args []string) error {
 	return nil
 }
 
-func (c *cli) logsCommand(args []string) error {
+func (c *cli) logsCommand(commandContext context.Context, args []string) error {
 	opts, err := parseLogsArgs(args)
 	if err != nil {
 		return err
@@ -500,7 +525,7 @@ func (c *cli) logsCommand(args []string) error {
 		return err
 	}
 
-	_, store, err := c.readOnlyStore()
+	store, err := c.readOnlyStore(commandContext)
 	if err != nil {
 		return err
 	}
@@ -530,7 +555,7 @@ func (c *cli) logsCommand(args []string) error {
 		path := store.RunFile(opts.runID, persistence.PlannerLogFile)
 		return c.writeLogFile(opts.runID, runDir, source, view, path, "", opts.json)
 	case "step":
-		run, _, err := c.loadRun(opts.runID)
+		run, _, err := c.loadRun(commandContext, opts.runID)
 		if err != nil {
 			return err
 		}
@@ -565,8 +590,8 @@ func (c *cli) writeLogFile(runID string, runDir string, source string, view stri
 	return err
 }
 
-func (c *cli) loadRun(runID string) (engine.RunRecord, persistence.Store, error) {
-	_, store, err := c.readOnlyStore()
+func (c *cli) loadRun(commandContext context.Context, runID string) (engine.RunRecord, persistence.Store, error) {
+	store, err := c.readOnlyStore(commandContext)
 	if err != nil {
 		return engine.RunRecord{}, persistence.Store{}, err
 	}
@@ -599,7 +624,7 @@ func loadRunForInspect(store persistence.Store, runID string) (engine.RunRecord,
 			return run, nil
 		}
 		lastErr = err
-		if !isSummaryDriftError(err) {
+		if !errors.Is(err, engine.ErrStoredSummaryMismatch) {
 			return engine.RunRecord{}, err
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -668,9 +693,14 @@ func buildInspectSummary(runID string, statuses []persistence.StepStatus, starte
 		})
 	}
 
+	runStatus := summarizeInspectRunStatus(counts)
+	if finishedAt != nil && counts[string(engine.StepStateInterrupted)] > 0 {
+		runStatus = string(engine.StepStateInterrupted)
+	}
+
 	summary := persistence.Summary{
 		RunID:      runID,
-		Status:     summarizeInspectRunStatus(counts),
+		Status:     runStatus,
 		StartedAt:  startedAt,
 		FinishedAt: finishedAt,
 		Steps:      stepSummaries,
@@ -686,7 +716,7 @@ func summarizeInspectRunStatus(counts map[string]int) string {
 	switch {
 	case len(counts) == 0:
 		return string(engine.StepStateSuccess)
-	case counts[string(engine.StepStatePending)] > 0 || counts[string(engine.StepStateRunning)] > 0:
+	case counts[string(engine.StepStatePending)] > 0 || counts[string(engine.StepStateRunning)] > 0 || counts[string(engine.StepStateInterrupted)] > 0:
 		return string(engine.StepStatePending)
 	case counts[string(engine.StepStateFailure)] > 0:
 		return string(engine.StepStateFailure)
@@ -701,10 +731,6 @@ func summarizeInspectRunStatus(counts map[string]int) string {
 	default:
 		return string(engine.StepStateSuccess)
 	}
-}
-
-func isSummaryDriftError(err error) bool {
-	return strings.Contains(err.Error(), "stored summary ")
 }
 
 func cloneStringMap(src map[string]string) map[string]string {
@@ -758,6 +784,9 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 	if run.Meta.FinishedAt == nil || run.Summary.Status == "pending" {
 		return fmt.Errorf("publish refused: run %s has not finished", run.RunID)
 	}
+	if run.Summary.Status == string(engine.StepStateInterrupted) {
+		return fmt.Errorf("publish refused: run %s was interrupted", run.RunID)
+	}
 	if !run.Meta.GitHubEnabled {
 		return fmt.Errorf("publish refused: GitHub posting was disabled for this run")
 	}
@@ -779,12 +808,12 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 	return nil
 }
 
-func (c *cli) readOnlyStore() (string, persistence.Store, error) {
-	repoRoot, err := gitrepo.DiscoverRoot(context.Background(), c.cwd)
+func (c *cli) readOnlyStore(commandContext context.Context) (persistence.Store, error) {
+	repoRoot, err := gitrepo.DiscoverRoot(commandContext, c.cwd)
 	if err != nil {
-		return "", persistence.Store{}, err
+		return persistence.Store{}, err
 	}
-	return repoRoot, persistence.NewStore(repoRoot), nil
+	return persistence.NewStore(repoRoot), nil
 }
 
 func prepareContext(
@@ -827,19 +856,20 @@ func prepareContext(
 }
 
 func (c *cli) executeAndReport(
-	ctx context.Context,
+	commandContext context.Context,
+	forceStop <-chan struct{},
 	repo gitrepo.Info,
 	cfg config.File,
 	store persistence.Store,
 	runRecord engine.RunRecord,
 	noGitHub bool,
 ) error {
-	executed, err := engine.ExecuteRun(store, runRecord, engine.ExecuteOptions{
-		Context:  ctx,
-		Reporter: newReporter(cfg, noGitHub),
-		Stdout:   c.stdout,
-		Stderr:   c.stderr,
-		Progress: newProgressWriter(c.stderr, c.errStyles),
+	executed, err := engine.ExecuteRun(commandContext, store, runRecord, engine.ExecuteOptions{
+		ForceStop: forceStop,
+		Reporter:  newReporter(cfg, noGitHub),
+		Stdout:    c.stdout,
+		Stderr:    c.stderr,
+		Progress:  newProgressWriter(c.stderr, c.errStyles),
 	})
 	if err != nil {
 		return err
@@ -855,6 +885,12 @@ func (c *cli) executeAndReport(
 		_, _ = fmt.Fprintln(c.stdout, "github: disabled by --no-github; use local-ci publish <run-id> if you want to post this result later")
 	}
 
+	if executed.Summary.Status == string(engine.StepStateInterrupted) {
+		if interruptionCause := context.Cause(commandContext); interruptionCause != nil {
+			return interruptionCause
+		}
+		return engine.InterruptError{}
+	}
 	if failedSummary(executed.Summary.Status) {
 		return errRunFailed
 	}
@@ -1171,6 +1207,18 @@ func displayRunnerPID(meta persistence.Meta) *int {
 	return meta.RunnerPID
 }
 
+func getRunnerAlive(meta persistence.Meta) *bool {
+	runnerPID := displayRunnerPID(meta)
+	if runnerPID == nil || *runnerPID <= 0 {
+		return nil
+	}
+	runnerAlive, known := getProcessAlive(*runnerPID)
+	if !known {
+		return nil
+	}
+	return &runnerAlive
+}
+
 func displayRunStatus(summaryStatus string, statuses []persistence.StepStatus) string {
 	for _, statusItem := range statuses {
 		if statusItem.State == string(engine.StepStateRunning) {
@@ -1210,6 +1258,7 @@ func formatCounts(counts map[string]int) string {
 		string(engine.StepStateRunning),
 		string(engine.StepStatePending),
 		string(engine.StepStateFailure),
+		string(engine.StepStateInterrupted),
 		string(engine.StepStateBlocked),
 		string(engine.StepStateStale),
 		string(engine.StepStateSkipped),
@@ -1269,7 +1318,7 @@ func isRunningStep(statusItem persistence.StepStatus) bool {
 
 func isFailurePoint(statusItem persistence.StepStatus) bool {
 	switch statusItem.State {
-	case string(engine.StepStateFailure), string(engine.StepStateBlocked), string(engine.StepStateStale):
+	case string(engine.StepStateFailure), string(engine.StepStateInterrupted), string(engine.StepStateBlocked), string(engine.StepStateStale):
 		return true
 	default:
 		return false
@@ -1342,7 +1391,7 @@ func (s styles) status(text string, state string) string {
 		return s.wrap("32", text)
 	case string(engine.StepStateFailure):
 		return s.wrap("31", text)
-	case string(engine.StepStateBlocked), string(engine.StepStateSkipped), string(engine.StepStateStale):
+	case string(engine.StepStateInterrupted), string(engine.StepStateBlocked), string(engine.StepStateSkipped), string(engine.StepStateStale):
 		return s.wrap("33", text)
 	case string(engine.StepStateRunning), string(engine.StepStatePending):
 		return s.wrap("36", text)
@@ -1374,7 +1423,7 @@ func (s styles) progressLine(line string) string {
 		return s.wrap("32", line)
 	case strings.HasPrefix(trimmed, "fail "):
 		return s.wrap("31", line)
-	case strings.HasPrefix(trimmed, "blocked ") || strings.HasPrefix(trimmed, "skip ") || strings.HasPrefix(trimmed, "stale "):
+	case strings.HasPrefix(trimmed, "interrupted ") || strings.HasPrefix(trimmed, "blocked ") || strings.HasPrefix(trimmed, "skip ") || strings.HasPrefix(trimmed, "stale "):
 		return s.wrap("33", line)
 	case strings.HasPrefix(trimmed, "start ") || strings.HasPrefix(trimmed, "log "):
 		return s.wrap("36", line)
@@ -1513,7 +1562,8 @@ Examples:
 Notes:
   - Child stdout/stderr stream live.
   - Runner progress lines are separate from persisted step logs.
-  - On step failure the CLI prints the exact combined log path immediately.
+  - On step failure or interruption the CLI prints the exact combined log path immediately.
+  - SIGINT or SIGTERM stops the active step, including its process group on macOS and Linux, and finishes the run as interrupted.
   - Use --no-github to keep the run local-only, then local-ci publish <run-id> later if needed.
 `)
 }
@@ -1536,6 +1586,7 @@ Examples:
 Notes:
   - Resume reuses prior successful steps only when repo identity, HEAD SHA, config hash, and plan hash still match.
   - Resume fails closed when the stored run identity no longer matches the current checkout.
+  - Interrupted steps are rerun; prior successful steps are reused.
   - Use --no-github to keep the resumed execution local-only.
 `)
 }
@@ -1556,6 +1607,7 @@ Examples:
 Notes:
   - Active runs appear without a finished time.
   - Active runs show the stored runner PID when known.
+  - A dead recorded PID is flagged without changing the stored run.
   - Status is derived from persisted artifacts only; this command does not attach to a live process.
 `)
 }
@@ -1576,7 +1628,7 @@ Examples:
 Notes:
   - Works for both active and finished runs.
   - Reads meta.json, summary.json, events.jsonl, and per-step status.json from disk only.
-  - Shows the stored runner PID for active runs when known.
+  - Shows the stored runner PID for active runs when known and flags a dead recorded PID.
   - Shows the stored tree snapshot and dirty-file manifest for the run.
   - Does not attach to the running process.
   - This is the main snapshot/debug entrypoint for humans and LLMs.
@@ -1601,6 +1653,7 @@ Notes:
   - The current HEAD tree must exactly match the stored run snapshot.
   - The current config and resolved plan must still match the stored run.
   - A run that already posted during execution is not publishable again.
+  - Interrupted runs must be resumed successfully before publishing.
   - If the code, config, or plan changed after the run, publish is refused instead of guessing.
 `)
 }

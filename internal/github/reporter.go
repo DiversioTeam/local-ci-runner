@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 type Reporter interface {
@@ -24,10 +25,15 @@ func (reporter CLIReporter) PostStatus(ctx context.Context, target Target, statu
 		return err
 	}
 
-	cmd := exec.CommandContext(resolveContext(ctx), spec.name, spec.args...)
+	cmd := exec.CommandContext(ctx, spec.name, spec.args...)
 	cmd.Env = spec.env
+	// Bound orphaned output pipes after the report context is canceled.
+	cmd.WaitDelay = time.Second
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("run %s: %w", spec.name, context.Cause(ctx))
+		}
 		message := strings.TrimSpace(string(output))
 		if message == "" {
 			return fmt.Errorf("run %s: %w", spec.name, err)
@@ -93,19 +99,12 @@ func validateTarget(target Target) error {
 	return nil
 }
 
-func resolveContext(ctx context.Context) context.Context {
-	if ctx != nil {
-		return ctx
-	}
-	return context.Background()
-}
-
 func validateStatus(status Status) error {
 	if strings.TrimSpace(status.Context) == "" {
 		return fmt.Errorf("GitHub status context is required")
 	}
 	switch status.State {
-	case StatePending, StateSuccess, StateFailure:
+	case StatePending, StateSuccess, StateFailure, StateError:
 		return nil
 	default:
 		return fmt.Errorf("GitHub status state %q is not supported", status.State)
