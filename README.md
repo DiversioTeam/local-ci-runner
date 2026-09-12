@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/local-ci-logo.png" alt="local-ci logo" width="240" />
+</p>
+
 # local-ci-runner
 
 Shared local CI runner for repo-owned verification steps.
