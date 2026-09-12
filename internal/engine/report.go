@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"strings"
 	"time"
@@ -105,16 +106,21 @@ func postGitHubStatus(
 	meta persistence.Meta,
 	stepID string,
 	status ghstatus.Status,
-	at time.Time,
+	_ time.Time,
 ) error {
+	post := events.GitHubPost{Version: events.PublicationVersion, AttemptID: rand.Text(), Repo: meta.RepoSlug, SHA: meta.HeadSHA,
+		Context: status.Context, Source: appender.PublicationSource}
+	if err := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusRequested, stepID, string(status.State), post); err != nil {
+		return fmt.Errorf("record publication intent; no request sent: %w", err)
+	}
 	target := ghstatus.Target{Repo: meta.RepoSlug, SHA: meta.HeadSHA}
 	if err := reporter.PostStatus(ctx, target, status); err != nil {
 		// Preserve the reporting error if recording its diagnostic event also fails.
-		_ = appender.Append(at, events.GitHubStatusFailed, stepID, string(status.State), githubEventMessage(status))
+		_ = appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusFailed, stepID, string(status.State), post)
 		return fmt.Errorf("post GitHub status %s: %w", githubEventMessage(status), err)
 	}
-	if err := appender.Append(at, events.GitHubStatusPosted, stepID, string(status.State), githubEventMessage(status)); err != nil {
-		return err
+	if err := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusPosted, stepID, string(status.State), post); err != nil {
+		return fmt.Errorf("GitHub accepted status but receipt was not saved; inspect before retrying: %w", err)
 	}
 	return nil
 }

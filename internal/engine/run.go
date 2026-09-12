@@ -514,6 +514,7 @@ func renderSummaryText(runDir string, meta persistence.Meta, summary persistence
 	builder.WriteString("artifacts: ")
 	builder.WriteString(runDir)
 	builder.WriteByte('\n')
+	builder.WriteString("publication: inspect local-ci logs " + meta.RunID + " --runner --json (this index is not a publication receipt)\n")
 
 	if summary.StartedAt != nil {
 		builder.WriteString("started: ")
@@ -550,11 +551,11 @@ func renderSummaryText(runDir string, meta persistence.Meta, summary persistence
 	builder.WriteString(fmt.Sprintf("%t", meta.DirtyWorktree))
 	builder.WriteByte('\n')
 	if meta.GitHubPostingSuppressed != "" {
-		builder.WriteString("- github_posting: suppressed (")
+		builder.WriteString("- github_posting_at_execution: suppressed (")
 		builder.WriteString(meta.GitHubPostingSuppressed)
 		builder.WriteString(")\n")
 	} else if meta.GitHubEnabled {
-		builder.WriteString("- github_posting: enabled\n")
+		builder.WriteString("- github_posting_at_execution: enabled\n")
 	}
 
 	builder.WriteString("dirty_files:\n")

@@ -33,6 +33,7 @@ func TestCLIReporterCommandSpec(t *testing.T) {
 		"-f", "state=pending",
 		"-f", "context=local/verify",
 		"-f", "description=running",
+		"--hostname", "github.com",
 	}
 	assertStringsEqual(t, spec.args, wantArgs)
 	wantEnv := []string{"A=1", "B=2", "GH_TOKEN=runner-token", "GITHUB_TOKEN=runner-token"}

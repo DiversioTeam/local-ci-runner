@@ -21,8 +21,7 @@ write path                         read path
 -------------------------------   -----------------------------------
 local-ci run                       local-ci runs
 local-ci resume <run-id>           local-ci show <run-id>
-                                   local-ci logs <run-id>
-                                   local-ci publish <run-id>
+local-ci publish <run-id>          local-ci logs <run-id>
 ```
 
 The write path persists facts.
@@ -108,7 +107,21 @@ local-ci show 20260627T150405Z-deadbeef
 local-ci show 20260627T150405Z-deadbeef --json
 ```
 
+### Publication inspection
+
+`logs <run-id> --runner --json` includes typed publication events with exact
+targets and timestamps. There is no separate publication summary. These records
+are historical facts, not proof the latest resumed result was fully published.
+Missing or malformed evidence remains unknown. Execution-time settings are not receipts.
+
+This is offline inspection, not proof that GitHub statuses are still current,
+that a commit has been pushed, or that the current worktree/plan is validated.
+See `local-ci manual` section 8.1 for the complete version-matched JSON contract.
+
 ### `local-ci publish <run-id>`
+
+**Write command, not a dry run:** may execute the repo planner and posts
+GitHub statuses. Obtain separate authorization; do not use it as a trust probe.
 
 Use this when a run completed on a dirty worktree and intentionally skipped
 GitHub posting, but you later committed the exact same snapshot.
@@ -270,10 +283,16 @@ local-ci resume <run-id> # when the stored identity still matches
 ```bash
 local-ci show <run-id>
 # inspect head_tree_hash, worktree_tree_hash, dirty_worktree, dirty_files
-local-ci publish <run-id>
+local-ci logs <run-id> --runner --json
+# Inspect exact publication events. This does not validate the current checkout.
 ```
 
-If `publish` is refused, the current clean checkout no longer matches the stored run snapshot or plan.
+Only after explicit authorization, `publish` rechecks its existing eligibility
+conditions and may execute the planner. Refusal can also mean GitHub was
+disabled, the run is unfinished/interrupted, or posting was not suppressed.
+It is not necessarily a snapshot mismatch. After posting errors, inspect
+receipts before considering an explicit retry; success and local persistence
+cannot be atomic with GitHub.
 
 ### A planner-backed run looks wrong
 

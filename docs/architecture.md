@@ -29,7 +29,7 @@ The runner understands processes and files. Consumer repos own the actual verifi
 7. On SIGINT/SIGTERM, cancel that context and stop the active step, including its process group on macOS and Linux.
 8. Persist per-step status and logs.
 9. Append lifecycle events to `events.jsonl`.
-10. Post step and aggregate GitHub statuses.
+10. Sync typed intent, post step/aggregate GitHub statuses, then sync outcome receipts.
 11. Write `summary.json` and `summary.txt`.
 
 ### Read path
@@ -43,7 +43,12 @@ local-ci show <run-id>       -> snapshot view over persisted state
 local-ci logs <run-id>       -> render runner, planner, or step logs
 ```
 
-This split is intentional.
+This split is intentional. `publish` is a write command, not an inspection
+probe: it can execute the planner and writes GitHub statuses and local receipts.
+
+Publication extends the existing event stream with request IDs and exact
+targets. `logs --runner --json` exposes those records unchanged. No separate
+publication model, parser, state machine, or live-status service is introduced.
 
 Signal handling follows the same ownership rule:
 - the CLI translates process-wide SIGINT/SIGTERM into run-context cancellation

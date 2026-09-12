@@ -156,7 +156,6 @@ func (c *cli) run(args []string) error {
 }
 
 func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
-	c.maybePrintUpdateNotice(commandContext)
 	if len(args) == 0 {
 		c.printTopHelp()
 		return nil
@@ -187,18 +186,21 @@ func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan st
 			c.printPublishHelp()
 			return nil
 		}
+		c.maybePrintUpdateNotice(commandContext)
 		return c.publishCommand(commandContext, args[1:])
 	case "run":
 		if hasHelpFlag(args[1:]) {
 			c.printRunHelp()
 			return nil
 		}
+		c.maybePrintUpdateNotice(commandContext)
 		return c.runCommand(commandContext, forceStop, args[1:])
 	case "resume":
 		if hasHelpFlag(args[1:]) {
 			c.printResumeHelp()
 			return nil
 		}
+		c.maybePrintUpdateNotice(commandContext)
 		return c.resumeCommand(commandContext, forceStop, args[1:])
 	case "runs":
 		if hasHelpFlag(args[1:]) {
@@ -448,6 +450,7 @@ func (c *cli) showCommand(commandContext context.Context, args []string) error {
 	_, _ = fmt.Fprintf(c.stdout, "run: %s\n", run.RunID)
 	_, _ = fmt.Fprintf(c.stdout, "status: %s\n", c.outStyles.status(status, status))
 	_, _ = fmt.Fprintf(c.stdout, "repo: %s @ %s\n", run.Meta.RepoSlug, run.Meta.HeadSHA)
+	_, _ = fmt.Fprintf(c.stdout, "publication events: local-ci logs %s --runner --json\n", run.RunID)
 	_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", run.RunDir)
 	_, _ = fmt.Fprintf(c.stdout, "started: %s\n", formatTime(run.Meta.StartedAt))
 	if pid := displayRunnerPID(run.Meta); pid != nil {
@@ -459,7 +462,7 @@ func (c *cli) showCommand(commandContext context.Context, args []string) error {
 	}
 	_, _ = fmt.Fprintf(c.stdout, "snapshot:\n  head_tree: %s\n  worktree_tree: %s\n  dirty_worktree: %t\n", run.Meta.HeadTreeHash, run.Meta.WorktreeTreeHash, run.Meta.DirtyWorktree)
 	if run.Meta.GitHubPostingSuppressed != "" {
-		_, _ = fmt.Fprintf(c.stdout, "  github_posting: suppressed (%s)\n", run.Meta.GitHubPostingSuppressed)
+		_, _ = fmt.Fprintf(c.stdout, "  github_posting_at_execution: suppressed (%s)\n", run.Meta.GitHubPostingSuppressed)
 	}
 	if run.Meta.FinishedAt != nil {
 		_, _ = fmt.Fprintf(c.stdout, "finished: %s\n", formatTime(run.Meta.FinishedAt))
@@ -791,7 +794,7 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 		return fmt.Errorf("publish refused: GitHub posting was disabled for this run")
 	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
-		return fmt.Errorf("publish refused: run %s already posted during execution", run.RunID)
+		return fmt.Errorf("publish refused: run %s was configured to post during execution; publish requires a suppressed run", run.RunID)
 	}
 	if repo.DirtyWorktree {
 		return fmt.Errorf("publish refused: current worktree is dirty")
@@ -1490,6 +1493,7 @@ func (w *progressWriter) Write(payload []byte) (int, error) {
 }
 
 func (c *cli) printTopHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `local-ci runs repo-owned verification steps and stores each run under .local-ci/runs/<run-id>/.
 
 A run id is the timestamped directory name for one local CI session, for example:
@@ -1508,13 +1512,23 @@ Main commands:
   local-ci version             Print the installed version.
   local-ci manual              Print the built-in long-form manual.
 
-Debugging flow:
-  local-ci run
+Read-only debugging flow:
+  local-ci version
   local-ci runs
-  local-ci show <run-id>
+  local-ci show <run-id> --json
   local-ci logs <run-id>
   local-ci logs <run-id> --step <step-id>
-  local-ci publish <run-id>
+
+Side effects:
+  run/resume execute repo-owned code and may post GitHub statuses.
+  publish may execute the planner and posts statuses; it is NOT a dry run.
+  These commands require separate authorization. No command pushes commits or deploys by itself.
+  Repo-owned checks/planners can have their own side effects.
+  Help, manual, version, runs, show, and logs do not query GitHub or check for updates.
+
+Publication:
+  logs <run-id> --runner --json includes exact publication requests/outcomes.
+  Missing receipts mean unknown, not "not published". See manual section 8.1.
 
 Snapshot trust model:
   show <run-id> surfaces head_tree_hash, worktree_tree_hash, dirty_worktree,
@@ -1532,11 +1546,12 @@ Use 'local-ci version' or 'local-ci --version' to print the installed version.
 }
 
 func (c *cli) printVersionHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci version
   local-ci --version
 
-Print the installed local-ci version.
+Print the installed local-ci version. This command is offline and needs no repository.
 
 Notes:
   - Release builds print the tag version, for example v0.1.0.
@@ -1545,6 +1560,7 @@ Notes:
 }
 
 func (c *cli) printRunHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci run [--config <path>] [--no-github]
 
@@ -1569,6 +1585,7 @@ Notes:
 }
 
 func (c *cli) printResumeHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci resume <run-id> [--config <path>] [--no-github]
 
@@ -1592,6 +1609,7 @@ Notes:
 }
 
 func (c *cli) printRunsHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci runs [--json]
 
@@ -1613,6 +1631,7 @@ Notes:
 }
 
 func (c *cli) printShowHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci show <run-id> [--json]
 
@@ -1630,12 +1649,15 @@ Notes:
   - Reads meta.json, summary.json, events.jsonl, and per-step status.json from disk only.
   - Shows the stored runner PID for active runs when known and flags a dead recorded PID.
   - Shows the stored tree snapshot and dirty-file manifest for the run.
+  - For publication evidence, use logs <run-id> --runner --json (manual section 8.1).
+  - Receipts do not prove full publication, latest resumed results, or current GitHub checks.
   - Does not attach to the running process.
   - This is the main snapshot/debug entrypoint for humans and LLMs.
 `)
 }
 
 func (c *cli) printPublishHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci publish <run-id>
 
@@ -1648,17 +1670,23 @@ Examples:
   local-ci publish 20260627T150405Z-deadbeef
 
 Notes:
+  - MUTATING: may execute the repo planner and posts GitHub statuses. This is not a dry run.
+  - Records durable request intents and acknowledgements without rewriting the tested snapshot.
+  - Inspect logs <run-id> --runner --json after errors; do not automatically retry uncertain requests.
+  - Explicit retries append attempts and may create duplicate statuses. No automatic retry is added.
   - This is for dirty-worktree runs or --no-github runs that intentionally skipped GitHub posting.
   - The current worktree must be clean.
   - The current HEAD tree must exactly match the stored run snapshot.
   - The current config and resolved plan must still match the stored run.
-  - A run that already posted during execution is not publishable again.
+  - Runs configured to post during execution remain ineligible, even if reporting failed.
+    This eligibility rule is not proof of publication; inspect receipts for evidence.
   - Interrupted runs must be resumed successfully before publishing.
   - If the code, config, or plan changed after the run, publish is refused instead of guessing.
 `)
 }
 
 func (c *cli) printLogsHelp() {
+	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
   local-ci logs <run-id> [--runner | --planner | --step <step-id>] [--stdout | --stderr | --combined | --output-env] [--json]
 

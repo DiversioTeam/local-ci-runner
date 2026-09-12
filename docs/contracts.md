@@ -244,6 +244,7 @@ Initial event types:
 - `step.skipped`
 - `step.blocked`
 - `step.stale`
+- `github.status.requested`
 - `github.status.posted`
 - `github.status.failed`
 
@@ -304,6 +305,37 @@ Never a parent repo, sibling worktree, cached stale SHA, or a commit whose tree 
 On the first SIGINT or SIGTERM, the runner cancels the run and gives each active
 process group a short grace period. A second signal requests an immediate hard
 stop. Final artifact writes remain owned by the engine, not the signal handler.
+
+### Publication evidence, schema 1
+
+The canonical binary-facing field reference is embedded in
+[`MANUAL.md`, section 8.1](../cmd/local-ci/MANUAL.md#81-publication-receipts-binary-contract).
+Existing `logs --runner --json` exposes the raw events. There is no additional
+publication view, pairing engine, coverage calculation, or inferred state.
+
+Typed `github_post` event data contains version, unique attempt ID, repository,
+SHA, context, and source (`execution` or `publish`). The shared posting path syncs request intent
+before calling the reporter, then syncs acknowledgement/error afterward.
+A reporting error is an uncertain outcome, not proof of remote rejection.
+Raw API error bodies and credentials are not persisted in receipt fields.
+
+A posted event only establishes acknowledgement when its request ID and exact
+fields match a requested event. Consumers must leave malformed, conflicting,
+unsupported, or missing evidence unknown; the log reader is not a certifier.
+
+Old/mixed-version or unreadable evidence cannot prove absence of publication.
+Recorded targets can have known receipts while additional legacy history stays
+unknown. Original run SHA/tree/results are not rewritten by publication.
+Receipts are historical acknowledgement, not live status, GitHub commit
+existence checks, current-worktree validation, or deployment authorization.
+
+Writers refuse torn event tails rather than silently repairing records.
+Use one writer per run; concurrent execution/publication is unsupported.
+Local artifacts are not signed attestations against manual edits. Explicit
+publish retries append records and may duplicate remote statuses; no automatic
+retry behavior is added. Existing publish/resume eligibility checks remain.
+Posting is explicitly scoped to github.com, matching repository discovery,
+regardless of inherited `GH_HOST`.
 
 ## 7. Non-goals
 
