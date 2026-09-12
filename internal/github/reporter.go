@@ -77,6 +77,8 @@ func (reporter CLIReporter) commandSpec(target Target, status Status) (commandSp
 		args = append(args, "-f", "target_url="+status.TargetURL)
 	}
 
+	// Repository discovery accepts github.com only; inherited GH_HOST must not retarget receipts.
+	args = append(args, "--hostname", "github.com")
 	baseEnv := reporter.Env
 	if baseEnv == nil {
 		baseEnv = os.Environ()

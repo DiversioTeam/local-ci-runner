@@ -10,9 +10,10 @@ import (
 )
 
 type Appender struct {
-	path         string
-	runID        string
-	nextSequence int64
+	path              string
+	runID             string
+	nextSequence      int64
+	PublicationSource PublicationSource
 }
 
 func NewAppender(path string, runID string) (Appender, error) {
@@ -22,13 +23,23 @@ func NewAppender(path string, runID string) (Appender, error) {
 	}
 
 	return Appender{
-		path:         path,
-		runID:        runID,
-		nextSequence: nextSequence,
+		path:              path,
+		runID:             runID,
+		nextSequence:      nextSequence,
+		PublicationSource: PublicationExecution,
 	}, nil
 }
 
 func (appender *Appender) Append(now time.Time, eventType Type, stepID string, status string, message string) error {
+	return appender.addEvent(Event{Time: now.UTC(), Type: eventType, StepID: stepID, Status: status, Message: message})
+}
+
+func (appender *Appender) AddGitHubPost(now time.Time, eventType Type, stepID, status string, post GitHubPost) error {
+	return appender.addEvent(Event{Time: now.UTC(), Type: eventType, StepID: stepID, Status: status,
+		Message: post.Context + "=" + status, GitHubPost: &post})
+}
+
+func (appender *Appender) addEvent(event Event) error {
 	file, err := os.OpenFile(appender.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", appender.path, err)
@@ -37,15 +48,8 @@ func (appender *Appender) Append(now time.Time, eventType Type, stepID string, s
 		_ = file.Close()
 	}()
 
-	event := Event{
-		Sequence: appender.nextSequence,
-		Time:     now.UTC(),
-		RunID:    appender.runID,
-		Type:     eventType,
-		StepID:   stepID,
-		Status:   status,
-		Message:  message,
-	}
+	event.Sequence = appender.nextSequence
+	event.RunID = appender.runID
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
@@ -55,6 +59,12 @@ func (appender *Appender) Append(now time.Time, eventType Type, stepID string, s
 		return fmt.Errorf("write %s: %w", appender.path, err)
 	}
 
+	// A durable intent must exist before the network call; acknowledgement must also reach disk.
+	if event.GitHubPost != nil {
+		if err := file.Sync(); err != nil {
+			return fmt.Errorf("sync publication event: %w", err)
+		}
+	}
 	appender.nextSequence++
 	return nil
 }
@@ -71,6 +81,22 @@ func nextSequence(path string) (int64, error) {
 		_ = file.Close()
 	}()
 
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size() > 0 {
+		last := make([]byte, 1)
+		if _, err := file.ReadAt(last, info.Size()-1); err != nil {
+			return 0, err
+		}
+		if last[0] != '\n' {
+			return 0, fmt.Errorf("event log has an incomplete trailing line; refusing to append")
+		}
+	}
+	if _, err := ReadFile(path); err != nil {
+		return 0, err
+	}
 	var count int64
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {

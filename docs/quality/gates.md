@@ -24,7 +24,14 @@ go run ./cmd/local-ci manual
 ## Why these gates exist
 
 - `gofmt` keeps the Go tree mechanically clean.
-- `go test ./...` is the main correctness gate.
+- `go test ./...` is the main correctness gate. Publication tests cover
+  exact targets, durable intent before posting, persistence failures, retries,
+  unknown reporting errors, and refusal to append to torn event logs.
+- Binary-only documentation tests build an executable with an injected version,
+  then run help/manual/version outside a repo without Git on PATH.
+  They verify embedded schema documentation against the compiled contract.
+  CLI tests verify existing runner-log JSON exposes receipt fields without
+  mutating inspected artifacts.
 - `go vet ./...` catches suspicious Go patterns.
 - `ruff check .` is kept in the standard command set so future Python helper
   files stay linted; today it exits cleanly because the repo has no tracked

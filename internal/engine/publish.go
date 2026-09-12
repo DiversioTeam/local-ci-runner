@@ -40,7 +40,7 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 		return fmt.Errorf("run %s was interrupted", run.RunID)
 	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
-		return fmt.Errorf("run %s already posted during execution", run.RunID)
+		return fmt.Errorf("run %s was configured to post during execution; publish requires a suppressed run", run.RunID)
 	}
 	if strings.TrimSpace(opts.TargetSHA) == "" {
 		return fmt.Errorf("target SHA is required")
@@ -56,6 +56,7 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 	if err != nil {
 		return err
 	}
+	appender.PublicationSource = events.PublicationPublish
 	now := resolveNow(opts.Now)
 	at := now()
 

@@ -99,9 +99,15 @@ func TestPostGitHubStatusAppendsEvent(t *testing.T) {
 	if got, want := reporter.posts[0].status.Context, "local/verify"; got != want {
 		t.Fatalf("context = %q, want %q", got, want)
 	}
-	payload := mustReadEventLog(t, path)
-	if got, want := payload, "{\"sequence\":1,\"time\":\"2026-06-27T15:04:05Z\",\"run_id\":\"run-1\",\"type\":\"github.status.posted\",\"status\":\"pending\",\"message\":\"local/verify=pending\"}\n"; got != want {
-		t.Fatalf("event log = %q, want %q", got, want)
+	items, err := events.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Type != events.GitHubStatusRequested || items[1].Type != events.GitHubStatusPosted {
+		t.Fatalf("expected request then acknowledgement, got %#v", items)
+	}
+	if *items[0].GitHubPost != *items[1].GitHubPost || items[1].GitHubPost.SHA != meta.HeadSHA || items[1].Time.Before(items[0].Time) {
+		t.Fatalf("incorrect request identity or acknowledgement time: %#v", items)
 	}
 }
 
@@ -181,7 +187,7 @@ func TestPublishCompletedRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got, want := err.Error(), "already posted during execution"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "publish requires a suppressed run"; !strings.Contains(got, want) {
 		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }

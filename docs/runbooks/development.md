@@ -17,7 +17,14 @@ If you changed the built-in docs or operator UX, also run:
 
 ```bash
 go run ./cmd/local-ci manual
+go run ./cmd/local-ci version
 ```
+
+Treat the embedded manual as a release contract, not a pointer to source-only
+docs. Every new flag, JSON field/state, side effect, and compatibility rule must
+be discoverable through the installed binary. Keep section 8.1 in sync with
+publication schema changes; compiled-binary tests check version/schema discovery.
+Do not retag or release while merely validating local changes.
 
 ## Where to start reading
 

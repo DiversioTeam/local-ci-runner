@@ -88,6 +88,29 @@ local-ci version
 local-ci manual
 ```
 
+## Binary-only discovery and publication evidence
+
+No source checkout is needed to learn the installed version:
+
+```bash
+local-ci version
+local-ci help version
+local-ci manual         # embedded, version-matched reference
+local-ci help show
+local-ci logs <run-id> --runner --json
+```
+
+Help/manual/version and inspection commands do not contact GitHub or check for
+updates. Existing runner logs include typed publication request/outcome events
+with exact repository/SHA/context and timestamps. There is no separate summary
+or inferred publication state. Missing legacy evidence remains unknown.
+Receipts describe history, not current GitHub status or checkout validation.
+
+`run`/`resume` execute repo-owned code and may post statuses. `publish` can
+execute the planner and posts statuses; it is not inspection or a dry run.
+These require separate authorization. See embedded manual section 8.1 for
+receipt fields, failure handling, compatibility, and retry boundaries.
+
 ## Docs
 
 - `AGENTS.md` — short agent/worktree map

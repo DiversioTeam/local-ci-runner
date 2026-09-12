@@ -16,7 +16,7 @@ import (
 // - 0: how to use the manual
 // - 1-3: purpose and command map
 // - 4-7: run model and command reference
-// - 8-11: JSON, active-run semantics, debugging, safety
+// - 8-12: JSON, active-run semantics, debugging, safety, configuration
 //
 //go:embed MANUAL.md
 var manualText string
@@ -25,6 +25,7 @@ func (c *cli) manualCommand(args []string) error {
 	if err := validateManualArgs(args); err != nil {
 		return err
 	}
+	c.printVersion()
 	_, err := io.WriteString(c.stdout, manualText)
 	return err
 }

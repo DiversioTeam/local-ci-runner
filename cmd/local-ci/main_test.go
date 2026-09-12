@@ -201,7 +201,7 @@ func TestValidatePublishableRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got, want := err.Error(), "already posted during execution"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "publish requires a suppressed run"; !strings.Contains(got, want) {
 		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }
@@ -256,7 +256,7 @@ func TestShowWorksForActiveAndFinishedRuns(t *testing.T) {
 	if !strings.Contains(activeText, "head_tree: head-tree") || !strings.Contains(activeText, "worktree_tree: worktree-tree") {
 		t.Fatalf("active show missing snapshot hashes:\n%s", activeText)
 	}
-	if !strings.Contains(activeText, "github_posting: suppressed (dirty_worktree)") {
+	if !strings.Contains(activeText, "github_posting_at_execution: suppressed (dirty_worktree)") {
 		t.Fatalf("active show missing github suppression reason:\n%s", activeText)
 	}
 	if !strings.Contains(activeText, "[modified] README.md @ blob-123") {
