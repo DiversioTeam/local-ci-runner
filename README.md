@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/local-ci-logo.png" alt="local-ci logo" width="240" />
+</p>
+
 # local-ci-runner
 
 Shared local CI runner for repo-owned verification steps.
@@ -22,8 +26,10 @@ brew upgrade local-ci
 ```
 
 <p align="center">
-  <img src="./assets/local-ci-overview.png" alt="local-ci overview: you bring the machine, the repo brings the rules, local-ci runs the exact plan locally, you inspect the run, and GitHub gets a status only for the verified snapshot" width="1100" />
+  <img src="./assets/local-ci-overview.gif" alt="local-ci runs the repo’s exact plan on your machine. Inspect logs, artifacts, and events locally. Optional GitHub posting requires a matching repo, SHA, config, plan, and tree; report the verified pass or fail result." width="1100" />
 </p>
+
+[View the static diagram](./assets/local-ci-overview.png).
 
 ## What this is
 
