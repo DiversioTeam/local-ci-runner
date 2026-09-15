@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -300,5 +301,30 @@ func TestUpdaterApplyToleratesSlowDownload(t *testing.T) {
 	}
 	if string(got) != "new-binary-contents" {
 		t.Fatalf("binary contents = %q, want the downloaded binary", string(got))
+	}
+}
+
+// TestUpdaterApplyReportsMissingHomebrew covers the branch where the binary
+// sits in a Homebrew prefix but brew is not installed. It drives that through
+// the injected command runner so the result does not depend on whether the
+// machine running the tests happens to have Homebrew.
+func TestUpdaterApplyReportsMissingHomebrew(t *testing.T) {
+	t.Parallel()
+
+	archive := buildReleaseArchive(t, "new-binary-contents")
+	server := releaseServer(t, "v0.2.0", archive, false)
+	defer server.Close()
+
+	updater := newTestUpdater(t, server, "v0.1.0", "/opt/homebrew/Cellar/local-ci/0.1.0/bin/local-ci")
+	updater.RunCommand = func(_ context.Context, name string, _ ...string) error {
+		return &exec.Error{Name: name, Err: exec.ErrNotFound}
+	}
+
+	err := updater.Apply(context.Background())
+	if err == nil {
+		t.Fatal("expected an error when brew is missing")
+	}
+	if !strings.Contains(err.Error(), "brew is not on PATH") {
+		t.Fatalf("Apply() error = %v, want it to explain that brew is missing", err)
 	}
 }
