@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,6 +272,90 @@ func TestExecuteRunPostsGitHubStatuses(t *testing.T) {
 	assertStatusPosts(t, got, want)
 }
 
+func TestExecuteRunContinuesAfterGitHubPostFailure(t *testing.T) {
+	t.Parallel()
+
+	plan := config.ResolvedPlan{Steps: []config.Step{
+		{ID: "first", Command: []string{"/bin/sh", "-c", "printf 'first\\n'"}},
+		{ID: "second", Needs: []string{"first"}, Command: []string{"/bin/sh", "-c", "printf 'second\\n'"}},
+	}}
+	plan.ApplyDefaults()
+
+	fixture := newRunFixtureWithGitHub(t, plan, config.GitHub{Enabled: true, AggregateContext: config.DefaultAggregateContext})
+	run := prepareRunFixture(t, fixture)
+	reporter := &fakeReporter{
+		postError:      errors.New("network unavailable"),
+		failureAttempt: 2,
+	}
+
+	executed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{Reporter: reporter})
+	if err != nil {
+		t.Fatalf("ExecuteRun() error = %v", err)
+	}
+	if got, want := executed.Summary.Status, string(StepStateSuccess); got != want {
+		t.Fatalf("summary status = %q, want %q", got, want)
+	}
+	states := statusStates(executed.StepStatuses)
+	for _, stepID := range []string{"first", "second"} {
+		if got, want := states[stepID], string(StepStateSuccess); got != want {
+			t.Fatalf("%s state = %q, want %q", stepID, got, want)
+		}
+	}
+	if got, want := reporter.attempts, 2; got != want {
+		t.Fatalf("GitHub post attempts = %d, want %d", got, want)
+	}
+	if got, want := executed.Meta.GitHubPostingSuppressed, persistence.GitHubPostingSuppressionPostFailed; got != want {
+		t.Fatalf("GitHub posting suppression = %q, want %q", got, want)
+	}
+
+	storedRun, err := LoadRun(fixture.store, run.RunID)
+	if err != nil {
+		t.Fatalf("LoadRun() error = %v", err)
+	}
+	if got, want := storedRun.Meta.GitHubPostingSuppressed, persistence.GitHubPostingSuppressionPostFailed; got != want {
+		t.Fatalf("stored GitHub posting suppression = %q, want %q", got, want)
+	}
+	storedSummary := mustReadFile(t, fixture.store.RunFile(run.RunID, persistence.SummaryText))
+	if !strings.Contains(storedSummary, "github_posting_at_execution: suppressed ("+persistence.GitHubPostingSuppressionPostFailed+")") {
+		t.Fatalf("summary text missing GitHub posting suppression:\n%s", storedSummary)
+	}
+
+	eventItems := mustReadEvents(t, fixture.store.RunFile(run.RunID, persistence.EventsFile))
+	// The failure receipt is typed, so it records the context rather than the
+	// reporter's error text; the error itself surfaces through the CLI.
+	failedPost := findNthEventOfType(t, eventItems, events.GitHubStatusFailed, 1)
+	if failedPost.GitHubPost == nil {
+		t.Fatal("GitHub failure event is missing its publication receipt")
+	}
+	findNthEventOfType(t, eventItems, events.RunFinished, 1)
+
+	publishReporter := &fakeReporter{}
+	if err := PublishCompletedRun(t.Context(), fixture.store, storedRun, PublishOptions{
+		Reporter:  publishReporter,
+		TargetSHA: "def456",
+	}); err != nil {
+		t.Fatalf("PublishCompletedRun() error = %v", err)
+	}
+	if got, want := publishReporter.attempts, 3; got != want {
+		t.Fatalf("published GitHub statuses = %d, want %d", got, want)
+	}
+	// Publication records attempts in the event log and leaves the run itself
+	// alone, so the recovered run still carries why posting stopped.
+	publishedRun, err := LoadRun(fixture.store, run.RunID)
+	if err != nil {
+		t.Fatalf("LoadRun(published) error = %v", err)
+	}
+	if got, want := publishedRun.Meta.GitHubPostingSuppressed, persistence.GitHubPostingSuppressionPostFailed; got != want {
+		t.Fatalf("published run suppression = %q, want %q", got, want)
+	}
+	if err := PublishCompletedRun(t.Context(), fixture.store, publishedRun, PublishOptions{
+		Reporter:  &fakeReporter{},
+		TargetSHA: "def456",
+	}); err != nil {
+		t.Fatalf("second PublishCompletedRun() error = %v, want a recorded retry", err)
+	}
+}
+
 func TestPostTerminalStatusDuringRunRetriesAfterCancellation(t *testing.T) {
 	runContext, cancelRun := context.WithCancelCause(t.Context())
 	attempts := 0
@@ -292,6 +377,19 @@ func TestPostTerminalStatusDuringRunRetriesAfterCancellation(t *testing.T) {
 	}
 	if got, want := attempts, 2; got != want {
 		t.Fatalf("attempts = %d, want %d", got, want)
+	}
+}
+
+func TestPostTerminalStatusDuringRunReturnsPostFailureAfterCancellation(t *testing.T) {
+	runContext, cancelRun := context.WithCancel(t.Context())
+	cancelRun()
+	postCause := errors.New("network unavailable")
+
+	err := postTerminalStatusDuringRun(runContext, func(context.Context) error {
+		return &githubStatusPostError{cause: postCause}
+	})
+	if !errors.Is(err, postCause) {
+		t.Fatalf("postTerminalStatusDuringRun() error = %v, want %v", err, postCause)
 	}
 }
 

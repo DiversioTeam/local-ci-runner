@@ -153,7 +153,9 @@ Stores immutable run identity and the trust snapshot for that run:
 - `worktree_tree_hash`
 - `dirty_worktree`
 - `dirty_files[]` with path, status, and blob hash when known
-- `github_posting_suppressed` when the run intentionally skipped GitHub posting
+- `github_posting_suppressed` when the run skipped GitHub posting or stopped after a post failure
+
+Known suppression reasons are `dirty_worktree`, `cli_disabled`, and `post_failed`.
 
 Why the extra snapshot fields exist:
 - `HEAD SHA` answers "which commit was checked out?"
@@ -248,6 +250,8 @@ Initial event types:
 - `github.status.posted`
 - `github.status.failed`
 
+A `github.status.failed` message records the attempted context/state and the reporter error.
+
 Reader rule for active runs:
 - parse every complete line
 - tolerate one partial trailing line from an in-progress append
@@ -300,6 +304,10 @@ Never a parent repo, sibling worktree, cached stale SHA, or a commit whose tree 
 - step: `pending` before execution, terminal on completion
 - interrupted step and aggregate contexts post GitHub state `error`
 - final interruption posts use a fresh bounded context because the execution context is already canceled
+- the first remote post failure appends `github.status.failed`, persists `post_failed`, and disables later posts without stopping local execution
+- a run suppressed by `post_failed` can use `local-ci publish <run-id>` after auth or connectivity is fixed
+- successful publication clears the suppression marker so later publication attempts are refused
+- during ordinary execution, local artifact or event-write failures remain fatal
 - rerun-from-step must refresh affected step contexts and the aggregate context
 
 On the first SIGINT or SIGTERM, the runner cancels the run and gives each active

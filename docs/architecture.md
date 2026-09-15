@@ -30,6 +30,7 @@ The runner understands processes and files. Consumer repos own the actual verifi
 8. Persist per-step status and logs.
 9. Append lifecycle events to `events.jsonl`.
 10. Sync typed intent, post step/aggregate GitHub statuses, then sync outcome receipts.
+    After the first remote failure, persist `post_failed` and continue locally without further posts.
 11. Write `summary.json` and `summary.txt`.
 
 ### Read path

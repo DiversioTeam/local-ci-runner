@@ -129,6 +129,7 @@ local-ci --help
 local-ci help <command>
 local-ci help all
 local-ci version
+local-ci update
 local-ci manual
 ```
 
@@ -356,6 +357,8 @@ Important behavior:
 - on step failure or interruption, the CLI prints the exact combined log path
 - SIGINT or SIGTERM stops the active step, including its process group on macOS and Linux, and finishes the run as `interrupted`
 - interrupted GitHub step and aggregate contexts are posted as `error`
+- a GitHub posting failure is recorded, disables later posts, and does not stop local steps
+- the completed run can be published after fixing GitHub auth or connectivity
 - `--no-github` disables GitHub status posting for that execution
 
 Examples:
@@ -380,6 +383,7 @@ Important behavior:
 - resume is strict and fail-closed
 - it refuses to continue if repo identity, SHA, config hash, or plan hash changed
 - interrupted and otherwise unfinished steps rerun while prior successful steps are reused
+- a GitHub posting failure is recorded, disables later posts, and does not stop local steps
 - `--no-github` disables GitHub status posting for that execution
 
 Examples:
@@ -486,12 +490,13 @@ Purpose:
 - avoid rerunning when a dirty-worktree run and a later commit represent the same exact snapshot
 
 Important behavior:
-- intended for runs that skipped GitHub posting because the worktree was dirty or `--no-github` was used
+- intended for runs that skipped GitHub posting or stopped posting after a remote failure
 - requires a clean current worktree
 - requires the current `HEAD^{tree}` to exactly match the stored run snapshot
 - requires the current config and resolved plan to still match the stored run
-- refuses runs configured to post during execution, even if reporting failed;
-  this unchanged eligibility rule is not proof of publication—inspect receipts
+- refuses runs that posted during execution; a run that stopped posting after a
+  remote failure is eligible, and repeat publications are recorded as further
+  attempts; this eligibility rule is not proof of publication—inspect receipts
 - refuses to publish an interrupted run until it is resumed successfully
 - refuses to publish if the code, config, or resolved plan changed after the run
 - records request intents before posting and acknowledgements after posting
@@ -529,10 +534,27 @@ Interactive write commands also check the latest GitHub release on a small cache
 when a newer version exists, print:
 
 ```text
-update available: v0.1.0 -> v0.2.0; run: brew update && brew upgrade local-ci
+update available: v0.1.0 -> v0.2.0; run: local-ci update
 ```
 
-### 7.8 `local-ci manual`
+### 7.8 `local-ci update`
+
+Usage:
+
+```bash
+local-ci update
+```
+
+Purpose:
+- move the binary to the latest published release
+
+Notes:
+- Homebrew installs are handed to `brew`; any other install is replaced in place
+  after its published checksum is verified.
+- Development builds cannot update themselves.
+- A root-owned install directory needs `sudo local-ci update`.
+
+### 7.9 `local-ci manual`
 
 Usage:
 
@@ -820,6 +842,12 @@ If any of those differ, the old run is not trusted for posting.
 local-ci version
 ```
 
+### I want to move to the latest release
+
+```bash
+local-ci update
+```
+
 ### I want machine-readable output
 
 ```bash
@@ -849,6 +877,14 @@ That is also by design.
 Why:
 - showing a useful active-run snapshot is better than failing on a temporary cross-file timing gap
 - read-only commands do not mutate state, so this tolerance is low risk
+
+### GitHub posting failures do not stop local execution
+
+The first remote status-post failure appends `github.status.failed`, persists
+`github_posting_suppressed: post_failed`, and disables later posting attempts.
+Local steps and final artifacts continue normally. After fixing authentication or
+connectivity, publish the completed result with `local-ci publish <run-id>`.
+During ordinary execution, failures to write local artifacts or events remain fatal.
 
 ### Interruption is finalized by the engine
 

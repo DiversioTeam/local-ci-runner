@@ -74,7 +74,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := appender.Append(runStartedAt, events.RunStarted, "", runStatusPending, ""); err != nil {
 		return RunRecord{}, err
 	}
-	if err := postPendingAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, runStartedAt); err != nil {
+	postError := postPendingAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, runStartedAt)
+	if err := tolerateGitHubPostFailure(store, &run, postError); err != nil {
 		return RunRecord{}, err
 	}
 
@@ -103,7 +104,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 			if err := appender.Append(at, events.StepSkipped, step.ID, string(StepStateSkipped), "condition=false"); err != nil {
 				return RunRecord{}, err
 			}
-			if err := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at); err != nil {
+			postError := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at)
+			if err := tolerateGitHubPostFailure(store, &run, postError); err != nil {
 				return RunRecord{}, err
 			}
 			continue
@@ -122,7 +124,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 			if err := appender.Append(at, events.StepBlocked, step.ID, string(StepStateBlocked), message); err != nil {
 				return RunRecord{}, err
 			}
-			if err := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at); err != nil {
+			postError := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at)
+			if err := tolerateGitHubPostFailure(store, &run, postError); err != nil {
 				return RunRecord{}, err
 			}
 			continue
@@ -148,7 +151,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := appender.Append(finishedAt, events.RunFinished, "", run.Summary.Status, ""); err != nil {
 		return RunRecord{}, err
 	}
-	if err := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt); err != nil {
+	finalPostError := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt)
+	if err := tolerateGitHubPostFailure(store, &run, finalPostError); err != nil {
 		return RunRecord{}, err
 	}
 
@@ -184,7 +188,8 @@ func executeStep(
 	if err := appender.Append(startedAt, events.StepStarted, step.ID, string(StepStateRunning), ""); err != nil {
 		return err
 	}
-	if err := postStepPendingStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], startedAt); err != nil {
+	postError := postStepPendingStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], startedAt)
+	if err := tolerateGitHubPostFailure(store, run, postError); err != nil {
 		return err
 	}
 
@@ -223,7 +228,8 @@ func executeStep(
 	if err := appender.Append(finishedAt, events.StepFinished, step.ID, string(state), message); err != nil {
 		return err
 	}
-	if err := postStepTerminalStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], finishedAt); err != nil {
+	terminalPostError := postStepTerminalStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], finishedAt)
+	if err := tolerateGitHubPostFailure(store, run, terminalPostError); err != nil {
 		return err
 	}
 	printProgress(progress, "%s %s\n", stateLabel(state), step.ID)
@@ -301,6 +307,30 @@ func getInterruptionMessage(runContext context.Context) string {
 	return "run interrupted"
 }
 
+// tolerateGitHubPostFailure lets a run survive a failed status post.
+//
+// The local run is already the result that matters, so a remote failure is
+// recorded and swallowed rather than thrown. Recording it also stops later
+// posts, because githubPostingEnabled consults the same field — otherwise
+// every remaining step would wait for its own timeout against a dead remote.
+//
+// Anything else, including a failure to write the local event log, is returned
+// unchanged and ends the run.
+func tolerateGitHubPostFailure(store persistence.Store, run *RunRecord, postError error) error {
+	if !isGitHubPostFailure(postError) {
+		return postError
+	}
+
+	run.Meta.GitHubPostingSuppressed = persistence.GitHubPostingSuppressionPostFailed
+	if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.MetaFile), run.Meta); err != nil {
+		return fmt.Errorf("persist GitHub posting suppression: %w", err)
+	}
+	if err := persistSummary(store, run, run.Meta.FinishedAt); err != nil {
+		return fmt.Errorf("persist summary after GitHub posting failure: %w", err)
+	}
+	return nil
+}
+
 func postPendingAggregateStatus(
 	runContext context.Context,
 	reporter ghstatus.Reporter,
@@ -373,8 +403,11 @@ func postTerminalStatusDuringRun(runContext context.Context, postStatus func(con
 	// Terminal reporting must outlive canceled work but must not hang shutdown.
 	reportContext, cancelReport := context.WithTimeout(context.WithoutCancel(runContext), finalReportTimeout)
 	defer cancelReport()
-	// Local artifacts are already terminal; external reporting is best effort after cancellation.
-	_ = postStatus(reportContext)
+	// The step's own artifacts are already written, so the only outcome worth
+	// reporting back is a remote failure the caller still has to record.
+	if postError := postStatus(reportContext); isGitHubPostFailure(postError) {
+		return postError
+	}
 	return nil
 }
 

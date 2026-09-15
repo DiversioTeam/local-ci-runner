@@ -151,6 +151,15 @@ func (c *cli) printVersion() {
 	_, _ = fmt.Fprintf(c.stdout, "local-ci %s\n", update.Version)
 }
 
+func (c *cli) updateCommand(commandContext context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("update accepts no arguments")
+	}
+	// The updater reads the running binary's own path and version, so the CLI
+	// has nothing to pass it beyond where to report progress.
+	return update.Updater{Stdout: c.stdout}.Apply(commandContext)
+}
+
 func (c *cli) run(args []string) error {
 	return c.runWithContext(context.Background(), nil, args)
 }
@@ -181,6 +190,12 @@ func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan st
 		return c.helpCommand(args[1:])
 	case "manual":
 		return c.manualCommand(args[1:])
+	case "update":
+		if hasHelpFlag(args[1:]) {
+			c.printUpdateHelp()
+			return nil
+		}
+		return c.updateCommand(commandContext, args[1:])
 	case "publish":
 		if hasHelpFlag(args[1:]) {
 			c.printPublishHelp()
@@ -241,6 +256,8 @@ func (c *cli) helpCommand(args []string) error {
 		c.printPublishHelp()
 	case "version":
 		c.printVersionHelp()
+	case "update":
+		c.printUpdateHelp()
 	case "run":
 		c.printRunHelp()
 	case "resume":
@@ -794,7 +811,7 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 		return fmt.Errorf("publish refused: GitHub posting was disabled for this run")
 	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
-		return fmt.Errorf("publish refused: run %s was configured to post during execution; publish requires a suppressed run", run.RunID)
+		return fmt.Errorf("publish refused: run %s already posted to GitHub", run.RunID)
 	}
 	if repo.DirtyWorktree {
 		return fmt.Errorf("publish refused: current worktree is dirty")
@@ -886,6 +903,8 @@ func (c *cli) executeAndReport(
 		_, _ = fmt.Fprintln(c.stdout, "github: skipped for dirty worktree; commit the same snapshot and use local-ci publish <run-id>")
 	case "cli_disabled":
 		_, _ = fmt.Fprintln(c.stdout, "github: disabled by --no-github; use local-ci publish <run-id> if you want to post this result later")
+	case persistence.GitHubPostingSuppressionPostFailed:
+		_, _ = fmt.Fprintf(c.stdout, "github: posting failed; fix auth or network, then use local-ci publish %s\n", executed.RunID)
 	}
 
 	if executed.Summary.Status == string(engine.StepStateInterrupted) {
@@ -1510,6 +1529,7 @@ Main commands:
   local-ci logs <run-id>       Read runner, planner, or step logs from disk.
   local-ci publish <run-id>    Post a completed run to the current clean HEAD when the snapshot still matches.
   local-ci version             Print the installed version.
+  local-ci update              Update local-ci to the latest release.
   local-ci manual              Print the built-in long-form manual.
 
 Read-only debugging flow:
@@ -1559,6 +1579,19 @@ Notes:
 `)
 }
 
+func (c *cli) printUpdateHelp() {
+	_, _ = io.WriteString(c.stdout, `Usage:
+  local-ci update
+
+Update local-ci to the latest published release.
+
+Notes:
+  - Homebrew installs are handed to brew; any other install is replaced in place.
+  - Development builds cannot update themselves.
+  - A root-owned install directory needs sudo local-ci update.
+`)
+}
+
 func (c *cli) printRunHelp() {
 	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
@@ -1580,6 +1613,7 @@ Notes:
   - Runner progress lines are separate from persisted step logs.
   - On step failure or interruption the CLI prints the exact combined log path immediately.
   - SIGINT or SIGTERM stops the active step, including its process group on macOS and Linux, and finishes the run as interrupted.
+  - A GitHub posting failure is recorded and does not stop local steps; use local-ci publish <run-id> after fixing it.
   - Use --no-github to keep the run local-only, then local-ci publish <run-id> later if needed.
 `)
 }
@@ -1604,6 +1638,7 @@ Notes:
   - Resume reuses prior successful steps only when repo identity, HEAD SHA, config hash, and plan hash still match.
   - Resume fails closed when the stored run identity no longer matches the current checkout.
   - Interrupted steps are rerun; prior successful steps are reused.
+  - A GitHub posting failure is recorded and does not stop local steps; use local-ci publish <run-id> after fixing it.
   - Use --no-github to keep the resumed execution local-only.
 `)
 }
@@ -1674,11 +1709,12 @@ Notes:
   - Records durable request intents and acknowledgements without rewriting the tested snapshot.
   - Inspect logs <run-id> --runner --json after errors; do not automatically retry uncertain requests.
   - Explicit retries append attempts and may create duplicate statuses. No automatic retry is added.
-  - This is for dirty-worktree runs or --no-github runs that intentionally skipped GitHub posting.
+  - This is for runs that skipped GitHub posting or stopped posting after a remote failure.
   - The current worktree must be clean.
   - The current HEAD tree must exactly match the stored run snapshot.
   - The current config and resolved plan must still match the stored run.
-  - Runs configured to post during execution remain ineligible, even if reporting failed.
+  - Runs that posted during execution remain ineligible; a run that stopped
+    posting after a remote failure is eligible.
     This eligibility rule is not proof of publication; inspect receipts for evidence.
   - Interrupted runs must be resumed successfully before publishing.
   - If the code, config, or plan changed after the run, publish is refused instead of guessing.

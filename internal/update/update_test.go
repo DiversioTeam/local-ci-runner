@@ -54,6 +54,7 @@ func TestCheckerNoticeUsesCache(t *testing.T) {
 		CacheTTL:         time.Hour,
 		HTTPClient:       server.Client(),
 		Now:              func() time.Time { return now },
+		ExecutablePath:   "/home/dev/.local/bin/local-ci",
 	}
 
 	message, err := checker.Notice(context.Background())
@@ -62,6 +63,9 @@ func TestCheckerNoticeUsesCache(t *testing.T) {
 	}
 	if !strings.Contains(message, "update available: v0.1.0 -> v0.2.0") {
 		t.Fatalf("message = %q", message)
+	}
+	if !strings.Contains(message, upgradeCommand) {
+		t.Fatalf("message = %q, want it to point at %q", message, upgradeCommand)
 	}
 	message, err = checker.Notice(context.Background())
 	if err != nil {
@@ -72,5 +76,31 @@ func TestCheckerNoticeUsesCache(t *testing.T) {
 	}
 	if got, want := serverHits, 1; got != want {
 		t.Fatalf("server hits = %d, want %d", got, want)
+	}
+}
+
+func TestIsHomebrewPath(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "macos arm cellar", path: "/opt/homebrew/Cellar/local-ci/0.2.0/bin/local-ci", want: true},
+		{name: "macos intel cellar", path: "/usr/local/Cellar/local-ci/0.2.0/bin/local-ci", want: true},
+		{name: "linuxbrew", path: "/home/linuxbrew/.linuxbrew/Cellar/local-ci/0.2.0/bin/local-ci", want: true},
+		{name: "install script default", path: "/home/dev/.local/bin/local-ci", want: false},
+		{name: "install script system wide", path: "/usr/local/bin/local-ci", want: false},
+		{name: "go install", path: "/home/dev/go/bin/local-ci", want: false},
+		{name: "cellar as substring only", path: "/home/dev/Cellars/bin/local-ci", want: false},
+		{name: "empty", path: "", want: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := isHomebrewPath(testCase.path); got != testCase.want {
+				t.Fatalf("isHomebrewPath(%q) = %t, want %t", testCase.path, got, testCase.want)
+			}
+		})
 	}
 }

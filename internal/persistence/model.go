@@ -2,6 +2,11 @@ package persistence
 
 import "time"
 
+// GitHubPostingSuppressionPostFailed is the github_posting_suppressed reason for
+// a run that stopped posting after a remote failure, rather than one that never
+// intended to post. Such a run is still publishable once the remote is fixed.
+const GitHubPostingSuppressionPostFailed = "post_failed"
+
 type WorktreeFileStatus string
 
 const (

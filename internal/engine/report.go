@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,31 @@ import (
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
+
+// githubStatusPostError marks a failure to post a status to GitHub, as opposed
+// to a failure to record the attempt locally.
+//
+// The distinction decides whether a run survives. GitHub is downstream of the
+// result, so a failed post is recoverable and the run continues. The event log
+// is the result, so failing to write it ends the run.
+type githubStatusPostError struct {
+	cause error
+}
+
+func (postError *githubStatusPostError) Error() string {
+	return postError.cause.Error()
+}
+
+func (postError *githubStatusPostError) Unwrap() error {
+	return postError.cause
+}
+
+// isGitHubPostFailure reports whether err came from posting to GitHub rather
+// than from writing local run state. A nil error is not a failure.
+func isGitHubPostFailure(err error) bool {
+	var postError *githubStatusPostError
+	return errors.As(err, &postError)
+}
 
 const (
 	aggregateDescriptionRunning     = "local verification running"
@@ -115,9 +141,10 @@ func postGitHubStatus(
 	}
 	target := ghstatus.Target{Repo: meta.RepoSlug, SHA: meta.HeadSHA}
 	if err := reporter.PostStatus(ctx, target, status); err != nil {
-		// Preserve the reporting error if recording its diagnostic event also fails.
-		_ = appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusFailed, stepID, string(status.State), post)
-		return fmt.Errorf("post GitHub status %s: %w", githubEventMessage(status), err)
+		if appendError := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusFailed, stepID, string(status.State), post); appendError != nil {
+			return fmt.Errorf("record GitHub status failure: %w", appendError)
+		}
+		return &githubStatusPostError{cause: fmt.Errorf("post GitHub status %s: %w", githubEventMessage(status), err)}
 	}
 	if err := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusPosted, stepID, string(status.State), post); err != nil {
 		return fmt.Errorf("GitHub accepted status but receipt was not saved; inspect before retrying: %w", err)
