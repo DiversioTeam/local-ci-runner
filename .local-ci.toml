@@ -1,0 +1,34 @@
+version = 1
+
+[github]
+enabled = true
+aggregate_context = "local/verify"
+
+[[steps]]
+id = "fmt"
+name = "gofmt"
+# gofmt -l only lists; the emptiness check is what makes unformatted code fail.
+command = ["sh", "-c", "test -z \"$(gofmt -l cmd internal)\""]
+github_context = "local/fmt"
+
+[[steps]]
+id = "vet"
+name = "go vet"
+command = ["go", "vet", "./..."]
+needs = ["fmt"]
+github_context = "local/vet"
+
+[[steps]]
+id = "test"
+name = "go test"
+command = ["go", "test", "./..."]
+needs = ["fmt"]
+github_context = "local/test"
+
+[[steps]]
+id = "build"
+name = "go build"
+# Discard the binary so a verification run never dirties the worktree.
+command = ["go", "build", "-o", "/dev/null", "./cmd/local-ci"]
+needs = ["fmt"]
+github_context = "local/build"
