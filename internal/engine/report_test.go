@@ -3,7 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,14 +22,17 @@ type recordedStatus struct {
 }
 
 type fakeReporter struct {
-	posts         []recordedStatus
-	contextErrors []error
-	err           error
+	posts          []recordedStatus
+	contextErrors  []error
+	postError      error
+	failureAttempt int
+	attempts       int
 }
 
 func (reporter *fakeReporter) PostStatus(reportContext context.Context, target ghstatus.Target, status ghstatus.Status) error {
-	if reporter.err != nil {
-		return reporter.err
+	reporter.attempts++
+	if reporter.postError != nil && (reporter.failureAttempt == 0 || reporter.attempts == reporter.failureAttempt) {
+		return reporter.postError
 	}
 	reporter.contextErrors = append(reporter.contextErrors, reportContext.Err())
 	reporter.posts = append(reporter.posts, recordedStatus{target: target, status: status})
@@ -187,7 +190,7 @@ func TestPublishCompletedRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got, want := err.Error(), "publish requires a suppressed run"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "already posted to GitHub"; !strings.Contains(got, want) {
 		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }
@@ -200,16 +203,44 @@ func TestPostGitHubStatusReturnsReporterError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAppender() error = %v", err)
 	}
-	reporter := &fakeReporter{err: fmt.Errorf("boom")}
+	reporter := &fakeReporter{postError: errors.New("boom")}
 	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
 
 	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, fixedRunTime)
-	if err == nil {
-		t.Fatal("expected error")
+	var postError *githubStatusPostError
+	if !errors.As(err, &postError) {
+		t.Fatalf("postAggregateStatus() error = %v, want githubStatusPostError", err)
+	}
+	if !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("postAggregateStatus() error = %v, want the reporter error preserved", err)
 	}
 	payload := mustReadEventLog(t, path)
-	if payload == "" {
-		t.Fatal("expected failed event")
+	if !strings.Contains(payload, string(events.GitHubStatusFailed)) {
+		t.Fatalf("failed event = %q, want a recorded failure receipt", payload)
+	}
+}
+
+func TestPostGitHubStatusReturnsEventErrorWhenFailureCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+
+	path := writeEventFile(t)
+	appender, err := events.NewAppender(path, "run-1")
+	if err != nil {
+		t.Fatalf("NewAppender() error = %v", err)
+	}
+	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+		t.Fatalf("RemoveAll() error = %v", err)
+	}
+	reporter := &fakeReporter{postError: errors.New("boom")}
+	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
+
+	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, fixedRunTime)
+	var postError *githubStatusPostError
+	if errors.As(err, &postError) {
+		t.Fatalf("postAggregateStatus() error = %v, want local event error", err)
+	}
+	if err == nil {
+		t.Fatal("postAggregateStatus() error = nil, want a local event error")
 	}
 }
 

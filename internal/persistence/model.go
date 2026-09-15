@@ -2,6 +2,9 @@ package persistence
 
 import "time"
 
+// GitHubPostingSuppressionPostFailed identifies runs whose remote status posting stopped.
+const GitHubPostingSuppressionPostFailed = "post_failed"
+
 type WorktreeFileStatus string
 
 const (

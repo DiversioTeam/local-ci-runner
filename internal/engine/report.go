@@ -12,6 +12,19 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
 
+// githubStatusPostError separates recoverable remote failures from local event-write failures.
+type githubStatusPostError struct {
+	cause error
+}
+
+func (postError *githubStatusPostError) Error() string {
+	return postError.cause.Error()
+}
+
+func (postError *githubStatusPostError) Unwrap() error {
+	return postError.cause
+}
+
 const (
 	aggregateDescriptionRunning     = "local verification running"
 	aggregateDescriptionPassed      = "local verification passed"
@@ -115,9 +128,10 @@ func postGitHubStatus(
 	}
 	target := ghstatus.Target{Repo: meta.RepoSlug, SHA: meta.HeadSHA}
 	if err := reporter.PostStatus(ctx, target, status); err != nil {
-		// Preserve the reporting error if recording its diagnostic event also fails.
-		_ = appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusFailed, stepID, string(status.State), post)
-		return fmt.Errorf("post GitHub status %s: %w", githubEventMessage(status), err)
+		if appendError := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusFailed, stepID, string(status.State), post); appendError != nil {
+			return fmt.Errorf("record GitHub status failure: %w", appendError)
+		}
+		return &githubStatusPostError{cause: fmt.Errorf("post GitHub status %s: %w", githubEventMessage(status), err)}
 	}
 	if err := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusPosted, stepID, string(status.State), post); err != nil {
 		return fmt.Errorf("GitHub accepted status but receipt was not saved; inspect before retrying: %w", err)

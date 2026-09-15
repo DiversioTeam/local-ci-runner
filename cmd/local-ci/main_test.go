@@ -104,6 +104,7 @@ func TestSuppressedGitHubPostingReason(t *testing.T) {
 		{name: "github disabled", githubEnabled: false, want: ""},
 		{name: "cli disabled", githubEnabled: true, noGitHub: true, want: "cli_disabled"},
 		{name: "existing persists", githubEnabled: true, existing: "cli_disabled", want: "cli_disabled"},
+		{name: "post failure persists", githubEnabled: true, existing: persistence.GitHubPostingSuppressionPostFailed, want: persistence.GitHubPostingSuppressionPostFailed},
 		{name: "dirty worktree", githubEnabled: true, dirty: true, want: "dirty_worktree"},
 	}
 	for _, testCase := range cases {
@@ -201,7 +202,7 @@ func TestValidatePublishableRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got, want := err.Error(), "publish requires a suppressed run"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "already posted to GitHub"; !strings.Contains(got, want) {
 		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }

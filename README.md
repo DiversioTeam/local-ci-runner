@@ -156,6 +156,9 @@ SIGINT or SIGTERM stops the active step—including its process group on macOS
 and Linux—persists the run as `interrupted`, and lets
 `local-ci resume <run-id>` rerun unfinished work.
 
+A GitHub status-post failure is recorded and disables further posting without
+stopping local checks. Fix auth or connectivity, then publish the completed run.
+
 ## Command map
 
 ```bash
