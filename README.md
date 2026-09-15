@@ -13,6 +13,48 @@ reported.
 
 ## Install
 
+Release binaries are published for macOS and Linux on both `amd64` and
+`arm64`.
+
+### Install script (macOS, Debian, Ubuntu, Arch, and others)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/scripts/install.sh | sh
+```
+
+The script detects your OS and architecture, verifies the release checksum,
+and installs to `~/.local/bin`. Re-run it to upgrade. If you would rather
+read it before running it — a good habit for any piped installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/scripts/install.sh -o install-local-ci.sh
+less install-local-ci.sh
+sh install-local-ci.sh
+```
+
+Two environment variables adjust what it does:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LOCAL_CI_VERSION` | latest release | Install a specific version, e.g. `0.2.0` |
+| `LOCAL_CI_INSTALL_DIR` | `$HOME/.local/bin` | Install somewhere else |
+
+```bash
+# Pin a specific version.
+curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/scripts/install.sh \
+  | LOCAL_CI_VERSION=0.2.0 sh
+
+# Install system-wide instead of per-user.
+curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/scripts/install.sh -o install-local-ci.sh
+sudo sh -c 'LOCAL_CI_INSTALL_DIR=/usr/local/bin sh install-local-ci.sh'
+```
+
+It needs `tar`, a SHA-256 tool, and either `curl` or `wget` — all present on
+a stock Debian, Ubuntu, Arch, or macOS system. If `~/.local/bin` is not on
+your `PATH` the script tells you what to add to your shell profile.
+
+### Homebrew (macOS and Linux)
+
 ```bash
 brew tap DiversioTeam/tap
 brew install local-ci
@@ -24,6 +66,32 @@ Upgrade later with:
 brew update
 brew upgrade local-ci
 ```
+
+### Manual download
+
+Every release attaches `local-ci_<version>_<os>_<arch>.tar.gz` plus a
+`checksums.txt`, so you can pull a tarball straight from the
+[releases page](https://github.com/DiversioTeam/local-ci-runner/releases),
+verify it, and drop the `local-ci` binary anywhere on your `PATH`.
+
+### From source
+
+Any platform with a Go toolchain matching `go.mod`:
+
+```bash
+go install github.com/DiversioTeam/local-ci-runner/cmd/local-ci@latest
+```
+
+This builds from source and does not stamp a release version, so
+`local-ci version` reports a development version and the update check stays
+quiet.
+
+### Prerequisites
+
+`local-ci` shells out to `git`, so install it if your machine does not have
+it already — `sudo apt install git` on Debian and Ubuntu, `sudo pacman -S
+git` on Arch. Posting GitHub commit statuses also needs the `gh` CLI
+([installation instructions](https://github.com/cli/cli#installation)).
 
 <p align="center">
   <img src="./assets/local-ci-overview.gif" alt="local-ci runs the repo’s exact plan on your machine. Inspect logs, artifacts, and events locally. Optional GitHub posting requires a matching repo, SHA, config, plan, and tree; report the verified pass or fail result." width="1100" />

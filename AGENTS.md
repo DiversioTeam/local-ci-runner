@@ -41,6 +41,7 @@ consumer-repo-specific workflow logic.
 - `internal/update` — release version/update notice logic
 - `examples/basic` — minimal static config example
 - `.github/workflows/release.yml` — tagged release pipeline
+- `scripts/install.sh` — curl-to-shell installer for macOS and Linux
 - `scripts/release/write-homebrew-formula.sh` — Homebrew formula generator
 
 ## Commands
