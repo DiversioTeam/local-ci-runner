@@ -533,9 +533,6 @@ when a newer version exists, print:
 update available: v0.1.0 -> v0.2.0; run: local-ci update
 ```
 
-The check is cached for 12 hours, runs only on a terminal, and is skipped
-silently on any error, so it never delays or fails a command.
-
 ### 7.8 `local-ci update`
 
 Usage:
@@ -545,23 +542,13 @@ local-ci update
 ```
 
 Purpose:
-- update the binary to the latest published release
-- do it the way this binary was installed, without the operator tracking that
+- move the binary to the latest published release
 
-Behavior:
-- always queries GitHub directly, ignoring the 12-hour notice cache
-- prints the current version and exits without changes when already current
-- a Homebrew install is detected from the resolved binary path and handed to
-  `brew update` and `brew upgrade local-ci`
-- any other install downloads the release archive for this OS and architecture,
-  verifies its published SHA-256 checksum, and replaces the running binary
-- the replacement is staged in the target directory and renamed into place, so
-  the swap is atomic and a failure never leaves a half-written binary on PATH
-
-Failure modes:
-- a development build refuses to update and asks you to rebuild from source
-- a checksum mismatch aborts before anything is replaced
-- replacing a binary in a root-owned directory needs `sudo local-ci update`
+Notes:
+- Homebrew installs are handed to `brew`; any other install is replaced in place
+  after its published checksum is verified.
+- Development builds cannot update themselves.
+- A root-owned install directory needs `sudo local-ci update`.
 
 ### 7.9 `local-ci manual`
 

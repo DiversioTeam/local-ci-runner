@@ -1581,16 +1581,10 @@ func (c *cli) printUpdateHelp() {
 
 Update local-ci to the latest published release.
 
-Behavior:
-  - Always checks GitHub directly, ignoring the update-notice cache.
-  - Exits without changes when the installed version is already current.
-  - Homebrew installs are detected from the binary path and handed to brew.
-  - Any other install downloads the release archive, verifies its published
-    SHA-256 checksum, and replaces the running binary atomically.
-
 Notes:
-  - Development builds cannot update themselves; rebuild from source.
-  - Replacing a binary in a root-owned directory needs sudo local-ci update.
+  - Homebrew installs are handed to brew; any other install is replaced in place.
+  - Development builds cannot update themselves.
+  - A root-owned install directory needs sudo local-ci update.
 `)
 }
 

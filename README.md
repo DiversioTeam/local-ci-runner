@@ -55,15 +55,11 @@ your `PATH` the script tells you what to add to your shell profile.
 
 ### Upgrading
 
-However you installed it, `local-ci` updates itself:
+However you installed it:
 
 ```bash
 local-ci update
 ```
-
-It checks the latest release, hands Homebrew installs to `brew`, and otherwise
-downloads the release archive, verifies its checksum, and replaces the running
-binary in place. `local-ci` also prints a notice when a newer release exists.
 
 ### Homebrew (macOS and Linux)
 
