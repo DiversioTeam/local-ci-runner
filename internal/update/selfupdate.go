@@ -99,17 +99,18 @@ func (updater Updater) latestVersion(ctx context.Context) (string, error) {
 }
 
 func (updater Updater) upgradeWithHomebrew(ctx context.Context) error {
-	if _, err := exec.LookPath("brew"); err != nil {
-		return fmt.Errorf("this looks like a Homebrew install but brew is not on PATH; run: %s", brewUpgradeCommand)
-	}
 	updater.printf("detected a Homebrew install; handing over to brew\n")
 
 	// brew upgrade only sees the new version once the tap has been refreshed.
-	if err := updater.runCommand(ctx, "brew", "update"); err != nil {
-		return fmt.Errorf("brew update: %w", err)
-	}
-	if err := updater.runCommand(ctx, "brew", "upgrade", binaryName); err != nil {
-		return fmt.Errorf("brew upgrade %s: %w", binaryName, err)
+	for _, args := range [][]string{{"update"}, {"upgrade", binaryName}} {
+		if err := updater.runCommand(ctx, "brew", args...); err != nil {
+			// Reachable when a binary sits in a Homebrew prefix but brew is
+			// gone, such as a Cellar directory copied onto another machine.
+			if errors.Is(err, exec.ErrNotFound) {
+				return fmt.Errorf("this looks like a Homebrew install but brew is not on PATH; run: %s", brewUpgradeCommand)
+			}
+			return fmt.Errorf("brew %s: %w", strings.Join(args, " "), err)
+		}
 	}
 	return nil
 }
