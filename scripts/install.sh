@@ -93,9 +93,22 @@ tar -xzf "${WORK_DIR}/${ARCHIVE}" -C "$WORK_DIR" --no-same-owner \
 [ -f "${WORK_DIR}/local-ci" ] || fail "${ARCHIVE} did not contain a local-ci binary"
 
 mkdir -p "$INSTALL_DIR" || fail "could not create ${INSTALL_DIR}"
-chmod 755 "${WORK_DIR}/local-ci"
-# Replacing by rename keeps the install atomic and survives a running binary.
-mv -f "${WORK_DIR}/local-ci" "${INSTALL_DIR}/local-ci" || fail "could not install into ${INSTALL_DIR}"
+
+# Stage the new binary inside the install directory rather than moving it in
+# from WORK_DIR. mv is only atomic when it can rename, and rename(2) cannot
+# cross filesystems: WORK_DIR lives under $TMPDIR, which is routinely a
+# different mount (tmpfs on Linux, /var/folders on macOS), so moving from there
+# copies instead. That copy would leave a truncated binary on PATH if it were
+# interrupted, and would fail with ETXTBSY against a running local-ci. Staging
+# beside the target keeps both files on one filesystem, so the final mv really
+# is a rename.
+STAGED="$(mktemp "${INSTALL_DIR}/.local-ci.XXXXXX")" || fail "could not write to ${INSTALL_DIR}"
+# shellcheck disable=SC2064
+trap "rm -rf '$WORK_DIR'; rm -f '$STAGED'" EXIT
+
+cp "${WORK_DIR}/local-ci" "$STAGED" || fail "could not stage the new binary in ${INSTALL_DIR}"
+chmod 755 "$STAGED"
+mv -f "$STAGED" "${INSTALL_DIR}/local-ci" || fail "could not install into ${INSTALL_DIR}"
 
 echo "local-ci install: installed v${VERSION} to ${INSTALL_DIR}/local-ci"
 

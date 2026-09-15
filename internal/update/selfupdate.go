@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const binaryName = "local-ci"
@@ -24,6 +25,14 @@ const binaryName = "local-ci"
 // maxDownloadSize caps every download so a malformed or hostile response
 // cannot exhaust memory. Release binaries are a few MB; this is generous.
 const maxDownloadSize = 256 << 20
+
+// updateTimeout bounds the whole update exchange.
+//
+// The update notice runs on a ~1s budget because it is a background hint on a
+// small JSON document that may fail silently. An update must not inherit that:
+// http.Client.Timeout covers the response body too, so a multi-megabyte release
+// archive on anything but a fast link would abort part way through.
+const updateTimeout = 5 * time.Minute
 
 // Updater moves the running binary to the latest published release.
 //
@@ -78,7 +87,7 @@ func (updater Updater) Apply(ctx context.Context) error {
 func (updater Updater) latestVersion(ctx context.Context) (string, error) {
 	// Deliberately skips the notice cache. A 12-hour-old answer is fine for a
 	// passive hint, but someone asking to update wants today's release.
-	entry, err := updater.Checker.fetchLatest(ctx)
+	entry, err := updater.checker().fetchLatest(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -144,7 +153,7 @@ func (updater Updater) download(ctx context.Context, url string) ([]byte, error)
 	}
 	request.Header.Set("User-Agent", "local-ci-runner/"+updater.Checker.currentVersion())
 
-	response, err := updater.Checker.httpClient().Do(request)
+	response, err := updater.checker().httpClient().Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", url, err)
 	}
@@ -267,6 +276,16 @@ func (updater Updater) runCommand(ctx context.Context, name string, args ...stri
 	command.Stdout = updater.stdout()
 	command.Stderr = updater.stdout()
 	return command.Run()
+}
+
+// checker returns the release checker with a timeout suited to downloading,
+// unless a caller supplied its own client.
+func (updater Updater) checker() Checker {
+	checker := updater.Checker
+	if checker.HTTPClient == nil {
+		checker.HTTPClient = &http.Client{Timeout: updateTimeout}
+	}
+	return checker
 }
 
 func (updater Updater) downloadBaseURL() string {

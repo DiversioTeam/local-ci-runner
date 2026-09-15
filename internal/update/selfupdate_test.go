@@ -246,3 +246,59 @@ func TestExtractBinaryRejectsArchiveWithoutBinary(t *testing.T) {
 		t.Fatal("expected an error for an archive with no local-ci binary")
 	}
 }
+
+// TestUpdaterApplyToleratesSlowDownload pins the bug that the release download
+// must not inherit the update notice's ~1s budget. It deliberately leaves
+// HTTPClient unset so it exercises the client the CLI actually gets; injecting
+// a test client here is what hid the problem in the first place.
+func TestUpdaterApplyToleratesSlowDownload(t *testing.T) {
+	t.Parallel()
+
+	archive := buildReleaseArchive(t, "new-binary-contents")
+	archiveName := "local-ci_0.2.0_testos_testarch.tar.gz"
+	sum := sha256.Sum256(archive)
+	checksums := fmt.Sprintf("%s  %s\n", hex.EncodeToString(sum[:]), archiveName)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/releases/latest", func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(`{"tag_name":"v0.2.0"}`))
+	})
+	mux.HandleFunc("/download/v0.2.0/"+archiveName, func(writer http.ResponseWriter, _ *http.Request) {
+		// Longer than the notice budget, far below the update budget.
+		time.Sleep(1500 * time.Millisecond)
+		_, _ = writer.Write(archive)
+	})
+	mux.HandleFunc("/download/v0.2.0/checksums.txt", func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(checksums))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	executablePath := filepath.Join(t.TempDir(), "local-ci")
+	if err := os.WriteFile(executablePath, []byte("old-binary-contents"), 0o755); err != nil {
+		t.Fatalf("seed binary: %v", err)
+	}
+
+	updater := Updater{
+		Checker: Checker{
+			CurrentVersion:   "v0.1.0",
+			LatestReleaseURL: server.URL + "/releases/latest",
+			CachePath:        filepath.Join(t.TempDir(), "update.json"),
+			ExecutablePath:   executablePath,
+		},
+		Stdout:          &bytes.Buffer{},
+		DownloadBaseURL: server.URL + "/download",
+		Platform:        "testos_testarch",
+	}
+	if err := updater.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply() error = %v, want a slow download to succeed", err)
+	}
+
+	got, err := os.ReadFile(executablePath)
+	if err != nil {
+		t.Fatalf("read binary: %v", err)
+	}
+	if string(got) != "new-binary-contents" {
+		t.Fatalf("binary contents = %q, want the downloaded binary", string(got))
+	}
+}
