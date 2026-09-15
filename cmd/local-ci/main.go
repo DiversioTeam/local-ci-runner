@@ -155,6 +155,8 @@ func (c *cli) updateCommand(commandContext context.Context, args []string) error
 	if len(args) > 0 {
 		return fmt.Errorf("update accepts no arguments")
 	}
+	// The updater reads the running binary's own path and version, so the CLI
+	// has nothing to pass it beyond where to report progress.
 	return update.Updater{Stdout: c.stdout}.Apply(commandContext)
 }
 

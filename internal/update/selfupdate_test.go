@@ -84,8 +84,7 @@ func newTestUpdater(t *testing.T, server *httptest.Server, currentVersion string
 		},
 		Stdout:          &bytes.Buffer{},
 		DownloadBaseURL: server.URL + "/download",
-		GOOS:            "testos",
-		GOARCH:          "testarch",
+		Platform:        "testos_testarch",
 	}
 }
 
@@ -224,28 +223,6 @@ func TestUpdaterApplyRejectsDevelopmentBuild(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "development build") {
 		t.Fatalf("error = %v, want a development build error", err)
-	}
-}
-
-func TestDetectMethod(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		path string
-		want Method
-	}{
-		{name: "homebrew cellar", path: "/opt/homebrew/Cellar/local-ci/0.2.0/bin/local-ci", want: MethodHomebrew},
-		{name: "linuxbrew", path: "/home/linuxbrew/.linuxbrew/Cellar/local-ci/0.2.0/bin/local-ci", want: MethodHomebrew},
-		{name: "install script", path: "/home/dev/.local/bin/local-ci", want: MethodBinary},
-		{name: "system wide", path: "/usr/local/bin/local-ci", want: MethodBinary},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			if got := DetectMethod(testCase.path); got != testCase.want {
-				t.Fatalf("DetectMethod(%q) = %q, want %q", testCase.path, got, testCase.want)
-			}
-		})
 	}
 }
 

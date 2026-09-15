@@ -17,8 +17,12 @@ const (
 	DefaultVersion  = "dev"
 	DefaultCacheTTL = 12 * time.Hour
 
+	// upgradeCommand is what the notice tells the operator to run. One command
+	// covers every install method, because it works out the method itself.
+	upgradeCommand = "local-ci update"
+	// brewUpgradeCommand is only suggested when a Homebrew install is found but
+	// brew itself is missing, which local-ci cannot fix on the operator's behalf.
 	brewUpgradeCommand = "brew update && brew upgrade local-ci"
-	upgradeCommand     = "local-ci update"
 )
 
 var Version = DefaultVersion
@@ -75,13 +79,21 @@ func (checker Checker) executablePath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve executable path: %w", err)
 	}
-	// brew puts a symlink on PATH; only the resolved path shows the Cellar.
+	// Homebrew puts a symlink on PATH and keeps the real binary in the Cellar,
+	// so only the resolved path reveals a Homebrew install. Falling back to the
+	// unresolved path is fine: it just reads as a non-Homebrew install.
 	if resolvedPath, err := filepath.EvalSymlinks(executablePath); err == nil {
 		return resolvedPath, nil
 	}
 	return executablePath, nil
 }
 
+// isHomebrewPath reports whether a binary lives inside a Homebrew prefix.
+//
+// Homebrew and the install script ship the same release archive, so the install
+// method cannot be recorded at build time and the path is the only evidence.
+// Matching whole segments rather than a substring keeps an unrelated directory
+// such as ~/Cellars from looking like Homebrew.
 func isHomebrewPath(executablePath string) bool {
 	for _, segment := range strings.Split(filepath.ToSlash(executablePath), "/") {
 		if segment == "Cellar" || segment == ".linuxbrew" {

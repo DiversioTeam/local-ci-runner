@@ -19,48 +19,45 @@ import (
 	"strings"
 )
 
-// maxBinarySize caps what is read out of a release archive so a malformed or
-// hostile tarball cannot exhaust memory or disk.
-const maxBinarySize = 256 << 20
-
 const binaryName = "local-ci"
 
-// Method is how the running binary was installed, which decides how it updates.
-type Method string
+// maxDownloadSize caps every download so a malformed or hostile response
+// cannot exhaust memory. Release binaries are a few MB; this is generous.
+const maxDownloadSize = 256 << 20
 
-const (
-	MethodHomebrew Method = "homebrew"
-	MethodBinary   Method = "binary"
-)
-
-// Updater replaces the running binary with the latest published release.
+// Updater moves the running binary to the latest published release.
+//
+// The zero value works. The remaining fields exist so tests can point the
+// updater at a local server and a scratch platform instead of the real ones.
 type Updater struct {
-	Checker         Checker
-	Stdout          io.Writer
+	Checker Checker
+	Stdout  io.Writer
+
+	// DownloadBaseURL is where release archives live, without the tag.
 	DownloadBaseURL string
-	GOOS            string
-	GOARCH          string
-	RunCommand      func(ctx context.Context, name string, args ...string) error
+	// Platform names the release build to fetch, such as "darwin_arm64".
+	Platform string
+	// RunCommand runs an external command, so the brew path can be tested
+	// without a Homebrew installation.
+	RunCommand func(ctx context.Context, name string, args ...string) error
 }
 
-// Apply updates the running binary in place, or shells out to Homebrew when
-// the binary came from a Homebrew install.
+// Apply updates the running binary to the latest release.
+//
+// How it updates depends on where the binary lives. A Homebrew install has to
+// go back through brew, otherwise brew's own records would still describe the
+// old version. Every other install is just a file we can swap ourselves.
 func (updater Updater) Apply(ctx context.Context) error {
 	currentVersion := updater.Checker.currentVersion()
 	if currentVersion == DefaultVersion {
 		return errors.New("this is a development build; rebuild from source instead of running 'local-ci update'")
 	}
 
-	// Always ask GitHub directly: the notice cache may be up to 12h stale, and
-	// an explicit update request should act on the current release.
-	entry, err := updater.Checker.fetchLatest(ctx)
+	latestVersion, err := updater.latestVersion(ctx)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(entry.LatestVersion) == "" {
-		return errors.New("no published release found")
-	}
-	if !isNewerVersion(currentVersion, entry.LatestVersion) {
+	if !isNewerVersion(currentVersion, latestVersion) {
 		updater.printf("local-ci %s is already the latest version\n", currentVersion)
 		return nil
 	}
@@ -69,27 +66,36 @@ func (updater Updater) Apply(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	updater.printf("updating local-ci %s -> %s\n", currentVersion, entry.LatestVersion)
 
-	if DetectMethod(executablePath) == MethodHomebrew {
-		return updater.applyHomebrew(ctx)
-	}
-	return updater.applyBinary(ctx, entry.LatestVersion, executablePath)
-}
-
-// DetectMethod reports how the binary at executablePath was installed.
-func DetectMethod(executablePath string) Method {
+	updater.printf("updating local-ci %s -> %s\n", currentVersion, latestVersion)
 	if isHomebrewPath(executablePath) {
-		return MethodHomebrew
+		return updater.upgradeWithHomebrew(ctx)
 	}
-	return MethodBinary
+	return updater.replaceWithRelease(ctx, latestVersion, executablePath)
 }
 
-func (updater Updater) applyHomebrew(ctx context.Context) error {
+// latestVersion asks GitHub for the current release tag.
+func (updater Updater) latestVersion(ctx context.Context) (string, error) {
+	// Deliberately skips the notice cache. A 12-hour-old answer is fine for a
+	// passive hint, but someone asking to update wants today's release.
+	entry, err := updater.Checker.fetchLatest(ctx)
+	if err != nil {
+		return "", err
+	}
+	version := strings.TrimSpace(entry.LatestVersion)
+	if version == "" {
+		return "", errors.New("no published release found")
+	}
+	return version, nil
+}
+
+func (updater Updater) upgradeWithHomebrew(ctx context.Context) error {
 	if _, err := exec.LookPath("brew"); err != nil {
 		return fmt.Errorf("this looks like a Homebrew install but brew is not on PATH; run: %s", brewUpgradeCommand)
 	}
 	updater.printf("detected a Homebrew install; handing over to brew\n")
+
+	// brew upgrade only sees the new version once the tap has been refreshed.
 	if err := updater.runCommand(ctx, "brew", "update"); err != nil {
 		return fmt.Errorf("brew update: %w", err)
 	}
@@ -99,24 +105,23 @@ func (updater Updater) applyHomebrew(ctx context.Context) error {
 	return nil
 }
 
-func (updater Updater) applyBinary(ctx context.Context, version string, executablePath string) error {
-	archiveName := fmt.Sprintf(
-		"%s_%s_%s_%s.tar.gz",
-		binaryName,
-		strings.TrimPrefix(version, "v"),
-		updater.goos(),
-		updater.goarch(),
-	)
-	baseURL := strings.TrimSuffix(updater.downloadBaseURL(), "/") + "/" + version
+// replaceWithRelease downloads the release built for this machine, checks it
+// against the published checksum, and swaps it in for the running binary.
+func (updater Updater) replaceWithRelease(ctx context.Context, version string, executablePath string) error {
+	archiveName := fmt.Sprintf("%s_%s_%s.tar.gz", binaryName, strings.TrimPrefix(version, "v"), updater.platform())
+	releaseURL := strings.TrimSuffix(updater.downloadBaseURL(), "/") + "/" + version
 
-	archive, err := updater.download(ctx, baseURL+"/"+archiveName)
+	archive, err := updater.download(ctx, releaseURL+"/"+archiveName)
 	if err != nil {
 		return err
 	}
-	checksums, err := updater.download(ctx, baseURL+"/checksums.txt")
+	checksums, err := updater.download(ctx, releaseURL+"/checksums.txt")
 	if err != nil {
 		return err
 	}
+
+	// Verify before unpacking, so nothing reaches disk unless the bytes match
+	// what the release published.
 	if err := verifyChecksum(archive, checksums, archiveName); err != nil {
 		return err
 	}
@@ -124,9 +129,10 @@ func (updater Updater) applyBinary(ctx context.Context, version string, executab
 	if err != nil {
 		return err
 	}
-	if err := replaceBinary(executablePath, binary); err != nil {
+	if err := replaceFile(executablePath, binary); err != nil {
 		return err
 	}
+
 	updater.printf("updated %s to %s\n", executablePath, version)
 	return nil
 }
@@ -148,13 +154,11 @@ func (updater Updater) download(ctx context.Context, url string) ([]byte, error)
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: %s", url, response.Status)
 	}
-	payload, err := io.ReadAll(io.LimitReader(response.Body, maxBinarySize))
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", url, err)
-	}
-	return payload, nil
+	return io.ReadAll(io.LimitReader(response.Body, maxDownloadSize))
 }
 
+// verifyChecksum compares the archive against its line in checksums.txt, whose
+// format is "<sha256>  <file name>", one release archive per line.
 func verifyChecksum(archive []byte, checksums []byte, archiveName string) error {
 	expected := ""
 	for _, line := range strings.Split(string(checksums), "\n") {
@@ -164,17 +168,22 @@ func verifyChecksum(archive []byte, checksums []byte, archiveName string) error 
 			break
 		}
 	}
+	// An archive with no published checksum is not something to install.
 	if expected == "" {
 		return fmt.Errorf("no checksum published for %s", archiveName)
 	}
-	sum := sha256.Sum256(archive)
-	actual := hex.EncodeToString(sum[:])
-	if actual != expected {
-		return fmt.Errorf("checksum mismatch for %s: expected %s, got %s", archiveName, expected, actual)
+
+	actual := sha256.Sum256(archive)
+	if hex.EncodeToString(actual[:]) != expected {
+		return fmt.Errorf(
+			"checksum mismatch for %s: expected %s, got %s",
+			archiveName, expected, hex.EncodeToString(actual[:]),
+		)
 	}
 	return nil
 }
 
+// extractBinary pulls the local-ci binary out of a release archive.
 func extractBinary(archive []byte) ([]byte, error) {
 	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -188,64 +197,65 @@ func extractBinary(archive []byte) ([]byte, error) {
 	for {
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			return nil, fmt.Errorf("release archive did not contain a %s binary", binaryName)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read release archive: %w", err)
 		}
-		// Match on the base name only; the archive path is never joined onto a
-		// filesystem path, so a crafted entry name cannot escape anywhere.
+		// Matching on the base name keeps a crafted entry name harmless: the
+		// name from the archive is never joined onto a filesystem path.
 		if header.Typeflag != tar.TypeReg || filepath.Base(header.Name) != binaryName {
 			continue
 		}
-		binary, err := io.ReadAll(io.LimitReader(tarReader, maxBinarySize))
-		if err != nil {
-			return nil, fmt.Errorf("read %s from release archive: %w", binaryName, err)
-		}
-		return binary, nil
+		return io.ReadAll(io.LimitReader(tarReader, maxDownloadSize))
 	}
-	return nil, fmt.Errorf("release archive did not contain a %s binary", binaryName)
 }
 
-func replaceBinary(executablePath string, binary []byte) error {
-	targetDir := filepath.Dir(executablePath)
-	// Staging in the target directory keeps the swap on one filesystem, so the
-	// rename is atomic and never leaves a half-written binary on PATH.
-	temporaryFile, err := os.CreateTemp(targetDir, ".local-ci-update-*")
+// replaceFile swaps new contents in for the file at path.
+//
+// The new bytes are staged as a sibling and renamed over the target. Staging
+// in the same directory keeps both files on one filesystem, so the rename is
+// atomic: a failure part way through leaves the old binary in place rather
+// than a half-written one on PATH. Renaming over a running binary is safe on
+// Unix, because the running process holds the old inode open.
+func replaceFile(path string, contents []byte) error {
+	staged, err := os.CreateTemp(filepath.Dir(path), ".local-ci-update-*")
 	if err != nil {
-		return describePermissionError(err, executablePath)
+		return describeWriteError(err, path)
 	}
-	temporaryPath := temporaryFile.Name()
+	stagedPath := staged.Name()
+	// Harmless once the rename succeeds and the staged path no longer exists.
 	defer func() {
-		_ = os.Remove(temporaryPath)
+		_ = os.Remove(stagedPath)
 	}()
 
-	if _, err := temporaryFile.Write(binary); err != nil {
-		_ = temporaryFile.Close()
-		return fmt.Errorf("write %s: %w", temporaryPath, err)
+	if _, err := staged.Write(contents); err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("write %s: %w", stagedPath, err)
 	}
-	if err := temporaryFile.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", temporaryPath, err)
+	if err := staged.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", stagedPath, err)
 	}
-	if err := os.Chmod(temporaryPath, 0o755); err != nil {
-		return fmt.Errorf("chmod %s: %w", temporaryPath, err)
+	// CreateTemp makes the file 0600; an executable needs the usual mode.
+	if err := os.Chmod(stagedPath, 0o755); err != nil {
+		return fmt.Errorf("chmod %s: %w", stagedPath, err)
 	}
-	// Renaming over the running binary is safe on Unix: the running process
-	// keeps the old inode open while the path points at the new file.
-	if err := os.Rename(temporaryPath, executablePath); err != nil {
-		return describePermissionError(err, executablePath)
+	if err := os.Rename(stagedPath, path); err != nil {
+		return describeWriteError(err, path)
 	}
 	return nil
 }
 
-func describePermissionError(err error, executablePath string) error {
+// describeWriteError turns a permission failure into the action that fixes it,
+// since installing into a root-owned directory is a normal thing to have done.
+func describeWriteError(err error, path string) error {
 	if errors.Is(err, fs.ErrPermission) {
 		return fmt.Errorf(
 			"cannot replace %s: permission denied; re-run as a user that owns it, for example: sudo local-ci update",
-			executablePath,
+			path,
 		)
 	}
-	return fmt.Errorf("replace %s: %w", executablePath, err)
+	return fmt.Errorf("replace %s: %w", path, err)
 }
 
 func (updater Updater) runCommand(ctx context.Context, name string, args ...string) error {
@@ -253,6 +263,7 @@ func (updater Updater) runCommand(ctx context.Context, name string, args ...stri
 		return updater.RunCommand(ctx, name, args...)
 	}
 	command := exec.CommandContext(ctx, name, args...)
+	// brew reports progress on both streams; the operator should see it.
 	command.Stdout = updater.stdout()
 	command.Stderr = updater.stdout()
 	return command.Run()
@@ -265,18 +276,12 @@ func (updater Updater) downloadBaseURL() string {
 	return fmt.Sprintf("https://github.com/%s/releases/download", updater.Checker.repo())
 }
 
-func (updater Updater) goos() string {
-	if strings.TrimSpace(updater.GOOS) != "" {
-		return updater.GOOS
+// platform matches the os_arch suffix the release workflow builds archives for.
+func (updater Updater) platform() string {
+	if strings.TrimSpace(updater.Platform) != "" {
+		return updater.Platform
 	}
-	return runtime.GOOS
-}
-
-func (updater Updater) goarch() string {
-	if strings.TrimSpace(updater.GOARCH) != "" {
-		return updater.GOARCH
-	}
-	return runtime.GOARCH
+	return runtime.GOOS + "_" + runtime.GOARCH
 }
 
 func (updater Updater) stdout() io.Writer {
