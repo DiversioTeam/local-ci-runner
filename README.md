@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/s
 ```
 
 The script detects your OS and architecture, verifies the release checksum,
-and installs to `~/.local/bin`. Re-run it to upgrade. If you would rather
+and installs to `~/.local/bin`. If you would rather
 read it before running it — a good habit for any piped installer:
 
 ```bash
@@ -52,6 +52,18 @@ sudo sh -c 'LOCAL_CI_INSTALL_DIR=/usr/local/bin sh install-local-ci.sh'
 It needs `tar`, a SHA-256 tool, and either `curl` or `wget` — all present on
 a stock Debian, Ubuntu, Arch, or macOS system. If `~/.local/bin` is not on
 your `PATH` the script tells you what to add to your shell profile.
+
+### Upgrading
+
+However you installed it, `local-ci` updates itself:
+
+```bash
+local-ci update
+```
+
+It checks the latest release, hands Homebrew installs to `brew`, and otherwise
+downloads the release archive, verifies its checksum, and replaces the running
+binary in place. `local-ci` also prints a notice when a newer release exists.
 
 ### Homebrew (macOS and Linux)
 

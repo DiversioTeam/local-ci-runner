@@ -151,6 +151,13 @@ func (c *cli) printVersion() {
 	_, _ = fmt.Fprintf(c.stdout, "local-ci %s\n", update.Version)
 }
 
+func (c *cli) updateCommand(commandContext context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("update accepts no arguments")
+	}
+	return update.Updater{Stdout: c.stdout}.Apply(commandContext)
+}
+
 func (c *cli) run(args []string) error {
 	return c.runWithContext(context.Background(), nil, args)
 }
@@ -181,6 +188,12 @@ func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan st
 		return c.helpCommand(args[1:])
 	case "manual":
 		return c.manualCommand(args[1:])
+	case "update":
+		if hasHelpFlag(args[1:]) {
+			c.printUpdateHelp()
+			return nil
+		}
+		return c.updateCommand(commandContext, args[1:])
 	case "publish":
 		if hasHelpFlag(args[1:]) {
 			c.printPublishHelp()
@@ -241,6 +254,8 @@ func (c *cli) helpCommand(args []string) error {
 		c.printPublishHelp()
 	case "version":
 		c.printVersionHelp()
+	case "update":
+		c.printUpdateHelp()
 	case "run":
 		c.printRunHelp()
 	case "resume":
@@ -1510,6 +1525,7 @@ Main commands:
   local-ci logs <run-id>       Read runner, planner, or step logs from disk.
   local-ci publish <run-id>    Post a completed run to the current clean HEAD when the snapshot still matches.
   local-ci version             Print the installed version.
+  local-ci update              Update local-ci to the latest release.
   local-ci manual              Print the built-in long-form manual.
 
 Read-only debugging flow:
@@ -1556,6 +1572,25 @@ Print the installed local-ci version. This command is offline and needs no repos
 Notes:
   - Release builds print the tag version, for example v0.1.0.
   - Development builds print dev.
+`)
+}
+
+func (c *cli) printUpdateHelp() {
+	_, _ = io.WriteString(c.stdout, `Usage:
+  local-ci update
+
+Update local-ci to the latest published release.
+
+Behavior:
+  - Always checks GitHub directly, ignoring the update-notice cache.
+  - Exits without changes when the installed version is already current.
+  - Homebrew installs are detected from the binary path and handed to brew.
+  - Any other install downloads the release archive, verifies its published
+    SHA-256 checksum, and replaces the running binary atomically.
+
+Notes:
+  - Development builds cannot update themselves; rebuild from source.
+  - Replacing a binary in a root-owned directory needs sudo local-ci update.
 `)
 }
 

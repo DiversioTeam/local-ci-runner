@@ -64,8 +64,8 @@ func TestCheckerNoticeUsesCache(t *testing.T) {
 	if !strings.Contains(message, "update available: v0.1.0 -> v0.2.0") {
 		t.Fatalf("message = %q", message)
 	}
-	if !strings.Contains(message, scriptUpgradeCommand) {
-		t.Fatalf("message = %q, want the install-script upgrade command", message)
+	if !strings.Contains(message, upgradeCommand) {
+		t.Fatalf("message = %q, want it to point at %q", message, upgradeCommand)
 	}
 	message, err = checker.Notice(context.Background())
 	if err != nil {
@@ -100,35 +100,6 @@ func TestIsHomebrewPath(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := isHomebrewPath(testCase.path); got != testCase.want {
 				t.Fatalf("isHomebrewPath(%q) = %t, want %t", testCase.path, got, testCase.want)
-			}
-		})
-	}
-}
-
-func TestCheckerUpgradeCommand(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name           string
-		executablePath string
-		want           string
-	}{
-		{
-			name:           "homebrew install",
-			executablePath: "/opt/homebrew/Cellar/local-ci/0.2.0/bin/local-ci",
-			want:           brewUpgradeCommand,
-		},
-		{
-			name:           "install script",
-			executablePath: "/home/dev/.local/bin/local-ci",
-			want:           scriptUpgradeCommand,
-		},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			checker := Checker{ExecutablePath: testCase.executablePath}
-			if got := checker.upgradeCommand(); got != testCase.want {
-				t.Fatalf("upgradeCommand() = %q, want %q", got, testCase.want)
 			}
 		})
 	}

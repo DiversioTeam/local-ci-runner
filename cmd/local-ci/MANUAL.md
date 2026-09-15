@@ -129,6 +129,7 @@ local-ci --help
 local-ci help <command>
 local-ci help all
 local-ci version
+local-ci update
 local-ci manual
 ```
 
@@ -526,22 +527,43 @@ v0.1.0
 ```
 
 Interactive write commands also check the latest GitHub release on a small cache and,
-when a newer version exists, print an update notice.
-
-The suggested command matches how the running binary was installed. A Homebrew
-install is detected from its path and gets:
+when a newer version exists, print:
 
 ```text
-update available: v0.1.0 -> v0.2.0; run: brew update && brew upgrade local-ci
+update available: v0.1.0 -> v0.2.0; run: local-ci update
 ```
 
-Any other install — the install script, or a manually extracted tarball — gets:
+The check is cached for 12 hours, runs only on a terminal, and is skipped
+silently on any error, so it never delays or fails a command.
 
-```text
-update available: v0.1.0 -> v0.2.0; run: curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/scripts/install.sh | sh
+### 7.8 `local-ci update`
+
+Usage:
+
+```bash
+local-ci update
 ```
 
-### 7.8 `local-ci manual`
+Purpose:
+- update the binary to the latest published release
+- do it the way this binary was installed, without the operator tracking that
+
+Behavior:
+- always queries GitHub directly, ignoring the 12-hour notice cache
+- prints the current version and exits without changes when already current
+- a Homebrew install is detected from the resolved binary path and handed to
+  `brew update` and `brew upgrade local-ci`
+- any other install downloads the release archive for this OS and architecture,
+  verifies its published SHA-256 checksum, and replaces the running binary
+- the replacement is staged in the target directory and renamed into place, so
+  the swap is atomic and a failure never leaves a half-written binary on PATH
+
+Failure modes:
+- a development build refuses to update and asks you to rebuild from source
+- a checksum mismatch aborts before anything is replaced
+- replacing a binary in a root-owned directory needs `sudo local-ci update`
+
+### 7.9 `local-ci manual`
 
 Usage:
 
@@ -827,6 +849,12 @@ If any of those differ, the old run is not trusted for posting.
 
 ```bash
 local-ci version
+```
+
+### I want to move to the latest release
+
+```bash
+local-ci update
 ```
 
 ### I want machine-readable output

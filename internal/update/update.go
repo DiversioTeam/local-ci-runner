@@ -17,9 +17,8 @@ const (
 	DefaultVersion  = "dev"
 	DefaultCacheTTL = 12 * time.Hour
 
-	brewUpgradeCommand   = "brew update && brew upgrade local-ci"
-	scriptUpgradeCommand = "curl -fsSL https://raw.githubusercontent.com/" +
-		DefaultRepo + "/main/scripts/install.sh | sh"
+	brewUpgradeCommand = "brew update && brew upgrade local-ci"
+	upgradeCommand     = "local-ci update"
 )
 
 var Version = DefaultVersion
@@ -64,24 +63,8 @@ func (checker Checker) Notice(ctx context.Context) (string, error) {
 		"update available: %s -> %s; run: %s",
 		currentVersion,
 		entry.LatestVersion,
-		checker.upgradeCommand(),
+		upgradeCommand,
 	), nil
-}
-
-// upgradeCommand reports how to upgrade the binary that is actually running.
-// Homebrew and the install script ship the same release archive, so the install
-// method cannot be stamped at build time; the install path is the only signal.
-// Anything that is not recognisably Homebrew gets the install script, which is
-// also the correct advice for a manually extracted tarball.
-func (checker Checker) upgradeCommand() string {
-	executablePath, err := checker.executablePath()
-	if err != nil {
-		return scriptUpgradeCommand
-	}
-	if isHomebrewPath(executablePath) {
-		return brewUpgradeCommand
-	}
-	return scriptUpgradeCommand
 }
 
 func (checker Checker) executablePath() (string, error) {
