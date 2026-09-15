@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,7 +13,12 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
 
-// githubStatusPostError separates recoverable remote failures from local event-write failures.
+// githubStatusPostError marks a failure to post a status to GitHub, as opposed
+// to a failure to record the attempt locally.
+//
+// The distinction decides whether a run survives. GitHub is downstream of the
+// result, so a failed post is recoverable and the run continues. The event log
+// is the result, so failing to write it ends the run.
 type githubStatusPostError struct {
 	cause error
 }
@@ -23,6 +29,13 @@ func (postError *githubStatusPostError) Error() string {
 
 func (postError *githubStatusPostError) Unwrap() error {
 	return postError.cause
+}
+
+// isGitHubPostFailure reports whether err came from posting to GitHub rather
+// than from writing local run state. A nil error is not a failure.
+func isGitHubPostFailure(err error) bool {
+	var postError *githubStatusPostError
+	return errors.As(err, &postError)
 }
 
 const (
