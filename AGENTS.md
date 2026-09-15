@@ -17,16 +17,16 @@ It is responsible for:
 It is **not** responsible for Django, pytest, npm, CircleCI, or any other
 consumer-repo-specific workflow logic.
 
-## Read order
+## Docs, in read order
 
-1. `README.md`
-2. `docs/README.md`
-3. `docs/contracts.md`
-4. `docs/architecture.md`
-5. `docs/inspection.md`
-6. `docs/quality/gates.md`
-7. `docs/runbooks/development.md`
-8. `cmd/local-ci/MANUAL.md` when you need the full CLI/help surface
+1. `README.md` — what the tool is and how to install it
+2. `docs/README.md` — docs index and routing
+3. `docs/contracts.md` — config, planner, run-artifact, event, and GitHub-posting contracts
+4. `docs/architecture.md` — write path, read path, persistence, resume safety
+5. `docs/inspection.md` — operator mental model for `runs`, `show`, `logs`, `publish`
+6. `docs/quality/gates.md` — local commands, release CI, and common failures
+7. `docs/runbooks/development.md` — everyday dev loop and release-helper workflow
+8. `cmd/local-ci/MANUAL.md` — full CLI/help surface, when you need it
 
 ## Repo shape
 
@@ -38,7 +38,8 @@ consumer-repo-specific workflow logic.
 - `internal/events` — append-only event log contract
 - `internal/github` — commit-status posting
 - `internal/gitrepo` — repo discovery and identity helpers
-- `internal/update` — release version/update notice logic
+- `internal/update` — release version, update notice, and self-update logic
+- `.local-ci.toml` — this repo's own verification steps
 - `examples/basic` — minimal static config example
 - `.github/workflows/release.yml` — tagged release pipeline
 - `scripts/install.sh` — curl-to-shell installer for macOS and Linux
@@ -50,10 +51,15 @@ consumer-repo-specific workflow logic.
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-ruff check .
 go build ./cmd/local-ci
 go run ./cmd/local-ci --help
 go run ./cmd/local-ci manual
+```
+
+This repo verifies itself with its own runner. From a clean worktree:
+
+```bash
+local-ci run
 ```
 
 ## Non-negotiable rules
@@ -66,15 +72,6 @@ go run ./cmd/local-ci manual
 - Resume/publish must fail closed for repo identity, SHA, config hash, plan hash, and snapshot mismatches.
 - Third-party auth env vars exposed by this tool must use `LOCAL_CI_` prefixes.
 - Preserve the clean split between generic runner behavior and repo-owned planner behavior.
-
-## Docs map
-
-- `docs/README.md` — docs index and routing
-- `docs/contracts.md` — config, planner, run-artifact, event, and GitHub-posting contracts
-- `docs/architecture.md` — write path, read path, persistence, resume safety
-- `docs/inspection.md` — operator mental model for `runs`, `show`, `logs`, `publish`
-- `docs/quality/gates.md` — local commands, release CI, and common failures
-- `docs/runbooks/development.md` — everyday dev loop and release-helper workflow
 
 ## Release notes
 

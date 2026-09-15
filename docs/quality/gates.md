@@ -10,7 +10,6 @@ Run these before pushing:
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-ruff check .
 ```
 
 Recommended quick sanity checks while editing CLI behavior:
@@ -33,9 +32,6 @@ go run ./cmd/local-ci manual
   CLI tests verify existing runner-log JSON exposes receipt fields without
   mutating inspected artifacts.
 - `go vet ./...` catches suspicious Go patterns.
-- `ruff check .` is kept in the standard command set so future Python helper
-  files stay linted; today it exits cleanly because the repo has no tracked
-  Python files.
 
 ## Release CI
 

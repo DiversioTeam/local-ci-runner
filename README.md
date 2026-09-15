@@ -210,7 +210,6 @@ receipt fields, failure handling, compatibility, and retry boundaries.
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-ruff check .
 go build ./cmd/local-ci
 go run ./cmd/local-ci --help
 go run ./cmd/local-ci manual

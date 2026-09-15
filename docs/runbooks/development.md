@@ -8,7 +8,6 @@ Short everyday loop for contributors working on `local-ci-runner`.
 gofmt -w cmd internal
 go test ./...
 go vet ./...
-ruff check .
 go build ./cmd/local-ci
 go run ./cmd/local-ci --help
 ```
