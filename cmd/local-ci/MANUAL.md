@@ -526,10 +526,19 @@ v0.1.0
 ```
 
 Interactive write commands also check the latest GitHub release on a small cache and,
-when a newer version exists, print:
+when a newer version exists, print an update notice.
+
+The suggested command matches how the running binary was installed. A Homebrew
+install is detected from its path and gets:
 
 ```text
 update available: v0.1.0 -> v0.2.0; run: brew update && brew upgrade local-ci
+```
+
+Any other install — the install script, or a manually extracted tarball — gets:
+
+```text
+update available: v0.1.0 -> v0.2.0; run: curl -fsSL https://raw.githubusercontent.com/DiversioTeam/local-ci-runner/main/scripts/install.sh | sh
 ```
 
 ### 7.8 `local-ci manual`

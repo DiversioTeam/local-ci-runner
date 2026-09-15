@@ -16,6 +16,10 @@ const (
 	DefaultRepo     = "DiversioTeam/local-ci-runner"
 	DefaultVersion  = "dev"
 	DefaultCacheTTL = 12 * time.Hour
+
+	brewUpgradeCommand   = "brew update && brew upgrade local-ci"
+	scriptUpgradeCommand = "curl -fsSL https://raw.githubusercontent.com/" +
+		DefaultRepo + "/main/scripts/install.sh | sh"
 )
 
 var Version = DefaultVersion
@@ -35,6 +39,7 @@ type Checker struct {
 	CacheTTL         time.Duration
 	HTTPClient       *http.Client
 	Now              func() time.Time
+	ExecutablePath   string
 }
 
 type releaseResponse struct {
@@ -56,10 +61,51 @@ func (checker Checker) Notice(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	return fmt.Sprintf(
-		"update available: %s -> %s; run: brew update && brew upgrade local-ci",
+		"update available: %s -> %s; run: %s",
 		currentVersion,
 		entry.LatestVersion,
+		checker.upgradeCommand(),
 	), nil
+}
+
+// upgradeCommand reports how to upgrade the binary that is actually running.
+// Homebrew and the install script ship the same release archive, so the install
+// method cannot be stamped at build time; the install path is the only signal.
+// Anything that is not recognisably Homebrew gets the install script, which is
+// also the correct advice for a manually extracted tarball.
+func (checker Checker) upgradeCommand() string {
+	executablePath, err := checker.executablePath()
+	if err != nil {
+		return scriptUpgradeCommand
+	}
+	if isHomebrewPath(executablePath) {
+		return brewUpgradeCommand
+	}
+	return scriptUpgradeCommand
+}
+
+func (checker Checker) executablePath() (string, error) {
+	if strings.TrimSpace(checker.ExecutablePath) != "" {
+		return checker.ExecutablePath, nil
+	}
+	executablePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve executable path: %w", err)
+	}
+	// brew puts a symlink on PATH; only the resolved path shows the Cellar.
+	if resolvedPath, err := filepath.EvalSymlinks(executablePath); err == nil {
+		return resolvedPath, nil
+	}
+	return executablePath, nil
+}
+
+func isHomebrewPath(executablePath string) bool {
+	for _, segment := range strings.Split(filepath.ToSlash(executablePath), "/") {
+		if segment == "Cellar" || segment == ".linuxbrew" {
+			return true
+		}
+	}
+	return false
 }
 
 func (checker Checker) currentVersion() string {
