@@ -105,27 +105,55 @@ func TestDiscoverSnapshotsLocalChanges(t *testing.T) {
 
 	for _, test := range []struct {
 		name       string
-		change     func(repoRoot string)
+		change     func(t *testing.T, repoRoot string)
 		wantPath   string
 		wantStatus WorktreeFileStatus
 	}{
 		{
-			name:       "modified tracked file",
-			change:     func(repoRoot string) { writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# dirty\n")) },
+			name: "modified tracked file",
+			change: func(t *testing.T, repoRoot string) {
+				writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# dirty\n"))
+			},
 			wantPath:   "README.md",
 			wantStatus: WorktreeFileModified,
 		},
 		{
-			name:       "untracked file",
-			change:     func(repoRoot string) { writeFile(t, filepath.Join(repoRoot, "new.go"), []byte("package main\n")) },
+			name: "untracked file",
+			change: func(t *testing.T, repoRoot string) {
+				writeFile(t, filepath.Join(repoRoot, "new.go"), []byte("package main\n"))
+			},
 			wantPath:   "new.go",
 			wantStatus: WorktreeFileAdded,
+		},
+		// Git quotes unusual names in line output, and trimming drops edge spaces.
+		{
+			name:       "untracked non-ASCII name",
+			change:     func(t *testing.T, repoRoot string) { writeFile(t, filepath.Join(repoRoot, "café.txt"), []byte("x\n")) },
+			wantPath:   "café.txt",
+			wantStatus: WorktreeFileAdded,
+		},
+		{
+			name:       "untracked name with a leading space",
+			change:     func(t *testing.T, repoRoot string) { writeFile(t, filepath.Join(repoRoot, " lead.txt"), []byte("x\n")) },
+			wantPath:   " lead.txt",
+			wantStatus: WorktreeFileAdded,
+		},
+		{
+			name: "modified non-ASCII tracked file",
+			change: func(t *testing.T, repoRoot string) {
+				writeFile(t, filepath.Join(repoRoot, "café.txt"), []byte("x\n"))
+				runGit(t, repoRoot, "add", "café.txt")
+				runGit(t, repoRoot, "commit", "-m", "add café")
+				writeFile(t, filepath.Join(repoRoot, "café.txt"), []byte("y\n"))
+			},
+			wantPath:   "café.txt",
+			wantStatus: WorktreeFileModified,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			repoRoot := newCommittedRepo(t)
-			test.change(repoRoot)
+			test.change(t, repoRoot)
 
 			info, err := Discover(t.Context(), repoRoot)
 			if err != nil {
