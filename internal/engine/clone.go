@@ -25,6 +25,7 @@ func cloneStep(step config.Step) config.Step {
 		Dir:           step.Dir,
 		Needs:         cloneStrings(step.Needs),
 		If:            step.If,
+		Timeout:       step.Timeout,
 		GitHubContext: step.GitHubContext,
 		Env:           cloneStringMap(step.Env),
 	}

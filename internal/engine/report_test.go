@@ -190,7 +190,7 @@ func TestPublishCompletedRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got, want := err.Error(), "already posted to GitHub"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "configured to post during execution"; !strings.Contains(got, want) {
 		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }

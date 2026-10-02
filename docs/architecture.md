@@ -18,15 +18,13 @@ The runner understands processes and files. Consumer repos own the actual verifi
 
 ### Write path
 
-1. Load `.local-ci.toml`.
-2. Resolve repo root, repo slug, and HEAD SHA.
-3. Create run directory and `meta.json`.
-4. Resolve a plan:
-   - static `[[steps]]`, or
-   - planner stdout JSON
+1. Discover repo root, repo slug, HEAD SHA, and worktree snapshot.
+2. Load `.local-ci.toml`.
+3. Get the static `[[steps]]` plan or execute the planner for stdout JSON. Refuse input changes during planning.
+4. Create the run directory and `meta.json` for those confirmed inputs.
 5. Persist `plan.json` and `plan.env`.
-6. Execute steps in dependency order under one run context.
-7. On SIGINT/SIGTERM, cancel that context and stop the active step, including its process group on macOS and Linux.
+6. Execute ready steps under one run context, bounded by `max_parallel` (default 1).
+7. On SIGINT/SIGTERM, stop launching new work and cancel every active process group on macOS and Linux.
 8. Persist per-step status and logs.
 9. Append lifecycle events to `events.jsonl`.
 10. Sync typed intent, post step/aggregate GitHub statuses, then sync outcome receipts.
@@ -96,11 +94,13 @@ Resume must fail closed if any of these changed:
 The runner can reuse prior successful steps only inside the same immutable run identity.
 Interrupted and otherwise unfinished steps are rerun.
 
-## Future parallel execution
+## Parallel execution
 
-The run context is a broadcast boundary. Future independent step goroutines will
-all derive their step contexts from it, so one cancellation reaches every active
-worker. Each worker owns one process group and isolated log files. The scheduler
-remains the single writer for statuses, summaries, events, and aggregate GitHub
-state; step failures are results and must not cancel independent siblings.
+`internal/engine/schedule.go` launches ready steps up to `max_parallel`. Workers receive immutable identity/plan data and return typed results; only the scheduler mutates statuses, summaries, events, and GitHub state. Step failures do not cancel independent siblings. Successful and skipped dependencies satisfy `needs`.
+
+Every worker derives from the run context, owns one process group and isolated logs, and can have an optional step timeout. A timeout fails that step; run cancellation interrupts active workers and leaves unstarted work pending. Fatal local persistence errors cancel and join all active workers before returning.
+
+Shared GitHub contexts combine all matching step results, including during publication. Interruption reporting shares one bounded shutdown budget. Execution and inspection use the same engine summary builder.
+
+The concurrency limit controls commands, not their internal worker pools. Consumer repos own database/cache/output isolation and toolchain preparation. See [the implementation and rollout checklist](plans/parallel-execution.md).
 

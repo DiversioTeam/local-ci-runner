@@ -33,11 +33,7 @@ func buildPublicationFixture(t *testing.T, suppressed bool) (persistence.Store, 
 	if suppressed {
 		reason = "cli_disabled"
 	}
-	run, err := PrepareRun(fixture.store, PrepareOptions{Identity: fixture.identity, Plan: fixture.plan, GitHub: fixture.github,
-		GitHubPostingSuppressed: reason, Now: fixedRunTime, Random: bytes.NewReader(cloneBytes(fixedRunEntropy))})
-	if err != nil {
-		t.Fatal(err)
-	}
+	run := prepareSuppressedRunFixture(t, fixture, reason)
 	reporter := publicationReporter(func(_ ghstatus.Target, _ ghstatus.Status) error {
 		items, err := events.ReadFile(fixture.store.RunFile(run.RunID, persistence.EventsFile))
 		if err != nil {

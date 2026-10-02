@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var stepIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -74,6 +75,12 @@ func validateStep(step Step) error {
 	}
 	if err := validateCommand(fmt.Sprintf("step %q command", step.ID), step.Command); err != nil {
 		return err
+	}
+	if step.Timeout != "" {
+		duration, err := time.ParseDuration(step.Timeout)
+		if err != nil || duration <= 0 {
+			return fmt.Errorf("step %q timeout must be a positive duration such as 10m", step.ID)
+		}
 	}
 	if step.If != "" && step.If != "true" && step.If != "false" {
 		return fmt.Errorf("step %q if must be empty, \"true\", or \"false\"", step.ID)

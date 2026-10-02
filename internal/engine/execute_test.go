@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,21 +178,16 @@ func TestExecuteRunCapturesLogsEventsAndBlockedSteps(t *testing.T) {
 func TestExecuteRunHonorsTopologicalOrderAndSkipConditions(t *testing.T) {
 	t.Parallel()
 
+	appendToOrderLog := func(name string) []string {
+		return []string{"/bin/sh", "-c", "printf '" + name + "\\n' >> \"$LOCAL_CI_REPO_ROOT/order.log\""}
+	}
+	// "later" is declared before its dependency. Each ordering pass takes every step whose
+	// dependencies are already ordered, so "independent" runs before the deferred "later".
 	plan := config.ResolvedPlan{Steps: []config.Step{
-		{
-			ID:      "later",
-			Needs:   []string{"first"},
-			Command: []string{"/bin/sh", "-c", "printf 'later\n' >> \"$LOCAL_CI_REPO_ROOT/order.log\""},
-		},
-		{
-			ID:      "skip",
-			If:      "false",
-			Command: []string{"/bin/sh", "-c", "printf 'skip\n' >> \"$LOCAL_CI_REPO_ROOT/order.log\""},
-		},
-		{
-			ID:      "first",
-			Command: []string{"/bin/sh", "-c", "printf 'first\n' >> \"$LOCAL_CI_REPO_ROOT/order.log\""},
-		},
+		{ID: "later", Needs: []string{"first"}, Command: appendToOrderLog("later")},
+		{ID: "skip", If: "false", Command: appendToOrderLog("skip")},
+		{ID: "first", Command: appendToOrderLog("first")},
+		{ID: "independent", Command: appendToOrderLog("independent")},
 	}}
 	plan.ApplyDefaults()
 
@@ -204,19 +200,14 @@ func TestExecuteRunHonorsTopologicalOrderAndSkipConditions(t *testing.T) {
 	}
 
 	orderLog := mustReadFile(t, filepath.Join(fixture.repoRoot, "order.log"))
-	if got, want := orderLog, "first\nlater\n"; got != want {
+	if got, want := orderLog, "first\nindependent\nlater\n"; got != want {
 		t.Fatalf("order log = %q, want %q", got, want)
 	}
 
 	states := statusStates(executed.StepStatuses)
-	if got, want := states["skip"], string(StepStateSkipped); got != want {
-		t.Fatalf("skip state = %q, want %q", got, want)
-	}
-	if got, want := states["first"], string(StepStateSuccess); got != want {
-		t.Fatalf("first state = %q, want %q", got, want)
-	}
-	if got, want := states["later"], string(StepStateSuccess); got != want {
-		t.Fatalf("later state = %q, want %q", got, want)
+	want := map[string]string{"first": "success", "later": "success", "skip": "skipped", "independent": "success"}
+	if !maps.Equal(states, want) {
+		t.Fatalf("states = %v, want %v", states, want)
 	}
 }
 
@@ -356,41 +347,89 @@ func TestExecuteRunContinuesAfterGitHubPostFailure(t *testing.T) {
 	}
 }
 
-func TestPostTerminalStatusDuringRunRetriesAfterCancellation(t *testing.T) {
-	runContext, cancelRun := context.WithCancelCause(t.Context())
-	attempts := 0
+func TestPostTerminalStatusDuringRun(t *testing.T) {
+	localError := errors.New("receipt write failed")
+	postFailure := errors.New("network unavailable")
+	for _, test := range []struct {
+		name         string
+		canceled     bool
+		post         func(attempt int, postContext context.Context, cancelRun context.CancelCauseFunc) error
+		wantError    error
+		wantAttempts int
+	}{
+		{
+			name: "cancellation mid-post retries once within the shutdown budget",
+			post: func(attempt int, postContext context.Context, cancelRun context.CancelCauseFunc) error {
+				if attempt == 1 {
+					cancelRun(InterruptError{Signal: syscall.SIGTERM})
+					<-postContext.Done()
+				}
+				return postContext.Err()
+			},
+			wantAttempts: 2,
+		},
+		{
+			name:     "remote failure after cancellation is returned",
+			canceled: true,
+			post: func(int, context.Context, context.CancelCauseFunc) error {
+				return &githubStatusPostError{cause: postFailure}
+			},
+			wantError:    postFailure,
+			wantAttempts: 1,
+		},
+		{
+			name:         "local error after cancellation is returned",
+			canceled:     true,
+			post:         func(int, context.Context, context.CancelCauseFunc) error { return localError },
+			wantError:    localError,
+			wantAttempts: 1,
+		},
+		{
+			name: "local error during cancellation is not retried",
+			post: func(_ int, _ context.Context, cancelRun context.CancelCauseFunc) error {
+				cancelRun(nil)
+				return localError
+			},
+			wantError:    localError,
+			wantAttempts: 1,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runContext, cancelRun := context.WithCancelCause(t.Context())
+			if test.canceled {
+				cancelRun(nil)
+			}
+			finalReportContext, cancelReport := context.WithTimeout(t.Context(), finalReportTimeout)
+			defer cancelReport()
+			attempts := 0
+			err := postTerminalStatusDuringRun(runContext, finalReportContext, func(postContext context.Context) error {
+				attempts++
+				return test.post(attempts, postContext, cancelRun)
+			})
+			if !errors.Is(err, test.wantError) || attempts != test.wantAttempts {
+				t.Fatalf("error = %v, attempts = %d; want %v, %d", err, attempts, test.wantError, test.wantAttempts)
+			}
+		})
+	}
 
-	err := postTerminalStatusDuringRun(runContext, func(reportContext context.Context) error {
-		attempts++
-		if attempts == 1 {
-			cancelRun(InterruptError{Signal: syscall.SIGTERM})
-			<-reportContext.Done()
-			return reportContext.Err()
+	t.Run("posts after cancellation share one shutdown budget", func(t *testing.T) {
+		runContext, cancelRun := context.WithCancel(t.Context())
+		cancelRun()
+		finalReportContext, cancelReport := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancelReport()
+		for range 2 {
+			err := postTerminalStatusDuringRun(runContext, finalReportContext, func(postContext context.Context) error {
+				if postContext != finalReportContext {
+					t.Fatal("reporting did not reuse the shared shutdown budget")
+				}
+				<-postContext.Done()
+				return postContext.Err()
+			})
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("report error = %v", err)
+			}
 		}
-		if reportContext.Err() != nil {
-			t.Fatalf("retry context error = %v, want nil", reportContext.Err())
-		}
-		return nil
 	})
-	if err != nil {
-		t.Fatalf("postTerminalStatusDuringRun() error = %v", err)
-	}
-	if got, want := attempts, 2; got != want {
-		t.Fatalf("attempts = %d, want %d", got, want)
-	}
-}
-
-func TestPostTerminalStatusDuringRunReturnsPostFailureAfterCancellation(t *testing.T) {
-	runContext, cancelRun := context.WithCancel(t.Context())
-	cancelRun()
-	postCause := errors.New("network unavailable")
-
-	err := postTerminalStatusDuringRun(runContext, func(context.Context) error {
-		return &githubStatusPostError{cause: postCause}
-	})
-	if !errors.Is(err, postCause) {
-		t.Fatalf("postTerminalStatusDuringRun() error = %v, want %v", err, postCause)
-	}
 }
 
 func TestExecuteRunFinalizesInterruptedStep(t *testing.T) {

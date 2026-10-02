@@ -40,6 +40,8 @@ type Meta struct {
 	StartedAt               *time.Time     `json:"started_at,omitempty"`
 	FinishedAt              *time.Time     `json:"finished_at,omitempty"`
 	RunnerPID               *int           `json:"runner_pid,omitempty"`
+	MaxParallel             int            `json:"max_parallel,omitempty"`
+	Interrupted             bool           `json:"interrupted,omitempty"`
 	HeadTreeHash            string         `json:"head_tree_hash,omitempty"`
 	WorktreeTreeHash        string         `json:"worktree_tree_hash,omitempty"`
 	DirtyWorktree           bool           `json:"dirty_worktree,omitempty"`
@@ -71,6 +73,8 @@ type StepStatus struct {
 	Index          int        `json:"index"`
 	Needs          []string   `json:"needs,omitempty"`
 	GitHubContext  string     `json:"github_context,omitempty"`
+	Timeout        string     `json:"timeout,omitempty"`
+	Message        string     `json:"message,omitempty"`
 	StartedAt      *time.Time `json:"started_at,omitempty"`
 	FinishedAt     *time.Time `json:"finished_at,omitempty"`
 	DurationMillis int64      `json:"duration_millis,omitempty"`

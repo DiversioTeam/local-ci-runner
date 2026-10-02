@@ -140,11 +140,21 @@ command = ["go", "test", "./..."]
 Run it:
 
 ```bash
+local-ci plan --json # executes the planner only; it may have side effects
 local-ci run
 local-ci runs
 local-ci show <run-id>
 local-ci logs <run-id>
 ```
+
+Opt into bounded parallel execution with top-level `max_parallel = 3` in the config. Use `needs` to order steps sharing mutable resources. Optional step `timeout = "10m"` fails and stops only that step. Configs without these fields stay serial with no deadline.
+
+```bash
+local-ci run --no-github --json
+local-ci resume <run-id> --from-step <step-id> --max-parallel 1 --json
+```
+
+JSON execution returns the same snapshot as `show --json`, with progress on stderr. Parallel child output remains in isolated step logs; independent checks continue after failures, and skipped dependencies satisfy `needs`. Shared GitHub contexts pass only when every matching step passed or was skipped.
 
 Dirty worktree while iterating:
 
@@ -152,7 +162,7 @@ Dirty worktree while iterating:
 local-ci run --no-github
 ```
 
-SIGINT or SIGTERM stops the active step—including its process group on macOS
+SIGINT or SIGTERM stops all active steps—including their process groups on macOS
 and Linux—persists the run as `interrupted`, and lets
 `local-ci resume <run-id>` rerun unfinished work.
 
@@ -162,6 +172,7 @@ stopping local checks. Fix auth or connectivity, then publish the completed run.
 ## Command map
 
 ```bash
+local-ci plan --json
 local-ci run
 local-ci resume <run-id>
 local-ci runs
@@ -191,7 +202,7 @@ with exact repository/SHA/context and timestamps. There is no separate summary
 or inferred publication state. Missing legacy evidence remains unknown.
 Receipts describe history, not current GitHub status or checkout validation.
 
-`run`/`resume` execute repo-owned code and may post statuses. `publish` can
+`plan` executes repo-owned planner code without running checks, creating run artifacts, or posting statuses; it is not guaranteed side-effect-free. `run`/`resume` execute repo-owned code and may post statuses. `publish` can
 execute the planner and posts statuses; it is not inspection or a dry run.
 These require separate authorization. See embedded manual section 8.1 for
 receipt fields, failure handling, compatibility, and retry boundaries.

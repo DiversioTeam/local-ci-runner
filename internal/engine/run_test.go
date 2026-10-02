@@ -463,13 +463,21 @@ func newRunFixtureWithGitHub(t *testing.T, plan config.ResolvedPlan, githubConfi
 
 func prepareRunFixture(t *testing.T, fixture runFixture) RunRecord {
 	t.Helper()
+	return prepareSuppressedRunFixture(t, fixture, "")
+}
+
+// prepareSuppressedRunFixture records why posting is suppressed, as `run --no-github` does.
+// Only such runs are publishable, so publication tests start here rather than editing a result.
+func prepareSuppressedRunFixture(t *testing.T, fixture runFixture, suppressedReason string) RunRecord {
+	t.Helper()
 
 	run, err := PrepareRun(fixture.store, PrepareOptions{
-		Identity: fixture.identity,
-		Plan:     fixture.plan,
-		GitHub:   fixture.github,
-		Now:      fixedRunTime,
-		Random:   bytes.NewReader(cloneBytes(fixedRunEntropy)),
+		Identity:                fixture.identity,
+		Plan:                    fixture.plan,
+		GitHub:                  fixture.github,
+		GitHubPostingSuppressed: suppressedReason,
+		Now:                     fixedRunTime,
+		Random:                  bytes.NewReader(cloneBytes(fixedRunEntropy)),
 	})
 	if err != nil {
 		t.Fatalf("PrepareRun() error = %v", err)

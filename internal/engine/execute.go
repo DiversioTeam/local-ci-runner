@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
@@ -20,15 +21,34 @@ import (
 
 const finalReportTimeout = 5 * time.Second
 
+var errStepLogWrite = errors.New("save step logs")
+
+type stepLogWriter struct {
+	file          *os.File
+	addWriteError func(error)
+}
+
+func (writer stepLogWriter) Write(output []byte) (int, error) {
+	writtenBytes, writeError := writer.file.Write(output)
+	if writeError != nil {
+		logError := fmt.Errorf("%w: %w", errStepLogWrite, writeError)
+		writer.addWriteError(logError)
+		return writtenBytes, logError
+	}
+	return writtenBytes, nil
+}
+
 // ExecuteOptions configures one run execution.
 type ExecuteOptions struct {
 	// ForceStop requests immediate process-group termination when closed.
-	ForceStop <-chan struct{}
-	Now       func() time.Time
-	Reporter  ghstatus.Reporter
-	Stdout    io.Writer
-	Stderr    io.Writer
-	Progress  io.Writer
+	ForceStop          <-chan struct{}
+	Now                func() time.Time
+	Reporter           ghstatus.Reporter
+	Stdout             io.Writer
+	Stderr             io.Writer
+	Progress           io.Writer
+	FromStep           string
+	finalReportContext context.Context
 }
 
 // ExecuteRun executes unfinished plan steps and persists their lifecycle.
@@ -41,6 +61,16 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		return RunRecord{}, err
 	}
 
+	if err := run.Plan.Validate(); err != nil {
+		return RunRecord{}, err
+	}
+	if opts.FromStep != "" {
+		statuses, err := MarkStaleFromStep(run.Plan, run.StepStatuses, opts.FromStep)
+		if err != nil {
+			return RunRecord{}, err
+		}
+		run.StepStatuses = statuses
+	}
 	order, err := executionOrder(run.Plan)
 	if err != nil {
 		return RunRecord{}, err
@@ -51,8 +81,23 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		return RunRecord{}, err
 	}
 
+	// All terminal posts share one shutdown budget, even with many active steps.
+	finalReportContext, cancelFinalReport := context.WithCancel(context.WithoutCancel(ctx))
+	opts.finalReportContext = finalReportContext
+	stopFinalReport := context.AfterFunc(ctx, func() {
+		timer := time.NewTimer(finalReportTimeout)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			cancelFinalReport()
+		case <-finalReportContext.Done():
+		}
+	})
+	defer stopFinalReport()
+	defer cancelFinalReport()
+
 	now := resolveNow(opts.Now)
-	stdout, stderr, progress := opts.Stdout, opts.Stderr, opts.Progress
+	progress := opts.Progress
 	if err := validateReporter(run.Meta, opts.Reporter); err != nil {
 		return RunRecord{}, err
 	}
@@ -61,6 +106,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		run.Meta.StartedAt = &startedAt
 	}
 	run.Meta.FinishedAt = nil
+	run.Meta.Interrupted = false
+	run.Meta.MaxParallel = max(1, run.Meta.MaxParallel)
 	runnerPID := os.Getpid()
 	run.Meta.RunnerPID = &runnerPID
 	if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.MetaFile), run.Meta); err != nil {
@@ -79,67 +126,19 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		return RunRecord{}, err
 	}
 
-	for _, stepIndex := range order {
-		if run.StepStatuses[stepIndex].State == string(StepStateSuccess) {
-			continue
-		}
-
-		step := run.Plan.Steps[stepIndex]
-		if ctx.Err() != nil {
-			if err := executeStep(ctx, opts.ForceStop, store, &run, stepIndex, step, now, &appender, opts.Reporter, stdout, stderr, progress); err != nil {
-				return RunRecord{}, err
-			}
-			break
-		}
-		if shouldSkipStep(step) {
-			at := now()
-			printProgress(progress, "skip %s (condition=false)\n", step.ID)
-			setTerminalState(&run.StepStatuses[stepIndex], StepStateSkipped, at, nil)
-			if err := persistStepStatus(store, run.RunID, stepIndex, run.StepStatuses[stepIndex]); err != nil {
-				return RunRecord{}, err
-			}
-			if err := persistSummary(store, &run, nil); err != nil {
-				return RunRecord{}, err
-			}
-			if err := appender.Append(at, events.StepSkipped, step.ID, string(StepStateSkipped), "condition=false"); err != nil {
-				return RunRecord{}, err
-			}
-			postError := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at)
-			if err := tolerateGitHubPostFailure(store, &run, postError); err != nil {
-				return RunRecord{}, err
-			}
-			continue
-		}
-
-		if blocked, message := blockedByDependencies(run.StepStatuses, step.Needs); blocked {
-			at := now()
-			printProgress(progress, "blocked %s (%s)\n", step.ID, message)
-			setTerminalState(&run.StepStatuses[stepIndex], StepStateBlocked, at, nil)
-			if err := persistStepStatus(store, run.RunID, stepIndex, run.StepStatuses[stepIndex]); err != nil {
-				return RunRecord{}, err
-			}
-			if err := persistSummary(store, &run, nil); err != nil {
-				return RunRecord{}, err
-			}
-			if err := appender.Append(at, events.StepBlocked, step.ID, string(StepStateBlocked), message); err != nil {
-				return RunRecord{}, err
-			}
-			postError := postStepTerminalStatusDuringRun(ctx, opts.Reporter, &appender, run.Meta, run.StepStatuses[stepIndex], at)
-			if err := tolerateGitHubPostFailure(store, &run, postError); err != nil {
-				return RunRecord{}, err
-			}
-			continue
-		}
-
-		if err := executeStep(ctx, opts.ForceStop, store, &run, stepIndex, step, now, &appender, opts.Reporter, stdout, stderr, progress); err != nil {
-			return RunRecord{}, err
-		}
-		if run.StepStatuses[stepIndex].State == string(StepStateInterrupted) {
-			break
-		}
+	if err := addStepsForExecution(ctx, store, &run, now, &appender, opts); err != nil {
+		return RunRecord{}, err
+	}
+	if run.Meta.MaxParallel > 1 {
+		printProgress(progress, "max_parallel=%d; child output stays in per-step logs; inspect local-ci show %s\n", run.Meta.MaxParallel, run.RunID)
+		opts.Stdout, opts.Stderr = nil, nil
+	}
+	if err := executeReadySteps(ctx, store, &run, order, now, &appender, opts); err != nil {
+		return RunRecord{}, err
 	}
 
 	finishedAt := now()
+	run.Meta.Interrupted = ctx.Err() != nil
 	run.Meta.FinishedAt = &finishedAt
 	if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.MetaFile), run.Meta); err != nil {
 		return RunRecord{}, err
@@ -151,7 +150,7 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := appender.Append(finishedAt, events.RunFinished, "", run.Summary.Status, ""); err != nil {
 		return RunRecord{}, err
 	}
-	finalPostError := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt)
+	finalPostError := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt, opts.finalReportContext)
 	if err := tolerateGitHubPostFailure(store, &run, finalPostError); err != nil {
 		return RunRecord{}, err
 	}
@@ -159,22 +158,10 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	return run, nil
 }
 
-func executeStep(
-	ctx context.Context,
-	forceStop <-chan struct{},
-	store persistence.Store,
-	run *RunRecord,
-	stepIndex int,
-	step config.Step,
-	now func() time.Time,
-	appender *events.Appender,
-	reporter ghstatus.Reporter,
-	stdout io.Writer,
-	stderr io.Writer,
-	progress io.Writer,
-) error {
+func addStepStart(ctx context.Context, store persistence.Store, run *RunRecord, stepIndex int, now func() time.Time, appender *events.Appender, opts ExecuteOptions) error {
+	step := run.Plan.Steps[stepIndex]
 	startedAt := now()
-	printProgress(progress, "start %s\n", step.ID)
+	printProgress(opts.Progress, "start %s\n", step.ID)
 	setRunningState(&run.StepStatuses[stepIndex], startedAt)
 	if err := resetStepArtifacts(store, run.RunID, stepIndex, step.ID); err != nil {
 		return err
@@ -188,29 +175,25 @@ func executeStep(
 	if err := appender.Append(startedAt, events.StepStarted, step.ID, string(StepStateRunning), ""); err != nil {
 		return err
 	}
-	postError := postStepPendingStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], startedAt)
+	status := getContextStepStatus(run.StepStatuses, run.StepStatuses[stepIndex])
+	if ctx.Err() != nil {
+		return nil
+	}
+	postError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, status, startedAt, opts.finalReportContext)
 	if err := tolerateGitHubPostFailure(store, run, postError); err != nil {
 		return err
 	}
 
-	runErr, exitCode, message := runProcess(ctx, forceStop, store, *run, stepIndex, step, stdout, stderr)
-	if runErr == nil {
-		if _, envErr := persistence.ReadEnvFile(store.StepFile(run.RunID, stepIndex, step.ID, persistence.OutputEnv)); envErr != nil {
-			runErr = envErr
-			message = envErr.Error()
-		}
-	}
+	return nil
+}
 
-	finishedAt := now()
-	state := classifyStepState(ctx, runErr)
-	if state == StepStateInterrupted {
-		exitCode = nil
-		message = getInterruptionMessage(ctx)
-	}
-	if runErr != nil {
-		if message == "" {
-			message = runErr.Error()
-		}
+func addStepResult(ctx context.Context, store persistence.Store, run *RunRecord, result stepResult, appender *events.Appender, opts ExecuteOptions) error {
+	stepIndex := result.stepIndex
+	step := run.Plan.Steps[stepIndex]
+	status := &run.StepStatuses[stepIndex]
+	finishedAt := result.finishedAt
+	state, exitCode, message := result.state, result.exitCode, result.message
+	if message != "" {
 		if err := appendRunnerMessage(store.StepFile(run.RunID, stepIndex, step.ID, persistence.StderrLog), message); err != nil {
 			return err
 		}
@@ -218,8 +201,9 @@ func executeStep(
 			return err
 		}
 	}
-	setCompletedState(&run.StepStatuses[stepIndex], state, startedAt, finishedAt, exitCode)
-	if err := persistStepStatus(store, run.RunID, stepIndex, run.StepStatuses[stepIndex]); err != nil {
+	setCompletedState(status, state, *status.StartedAt, finishedAt, exitCode)
+	status.Message = message
+	if err := persistStepStatus(store, run.RunID, stepIndex, *status); err != nil {
 		return err
 	}
 	if err := persistSummary(store, run, nil); err != nil {
@@ -228,76 +212,95 @@ func executeStep(
 	if err := appender.Append(finishedAt, events.StepFinished, step.ID, string(state), message); err != nil {
 		return err
 	}
-	terminalPostError := postStepTerminalStatusDuringRun(ctx, reporter, appender, run.Meta, run.StepStatuses[stepIndex], finishedAt)
+	// Report the saved local result before a remote request can delay progress.
+	printProgress(opts.Progress, "%s %s\n", stateLabel(state), step.ID)
+	if state == StepStateFailure || state == StepStateInterrupted {
+		printProgress(opts.Progress, "log %s\n", store.StepFile(run.RunID, stepIndex, step.ID, persistence.CombinedLog))
+	}
+	contextStatus := getContextStepStatus(run.StepStatuses, *status)
+	terminalPostError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, contextStatus, finishedAt, opts.finalReportContext)
 	if err := tolerateGitHubPostFailure(store, run, terminalPostError); err != nil {
 		return err
-	}
-	printProgress(progress, "%s %s\n", stateLabel(state), step.ID)
-	if state == StepStateFailure || state == StepStateInterrupted {
-		printProgress(progress, "log %s\n", store.StepFile(run.RunID, stepIndex, step.ID, persistence.CombinedLog))
 	}
 
 	return nil
 }
 
-func runProcess(ctx context.Context, forceStop <-chan struct{}, store persistence.Store, run RunRecord, stepIndex int, step config.Step, stdout io.Writer, stderr io.Writer) (error, *int, string) {
+func runProcess(ctx context.Context, forceStop <-chan struct{}, store persistence.Store, run RunRecord, stepIndex int, step config.Step, stdout io.Writer, stderr io.Writer) (runError error, exitCode *int, message string) {
 	stdoutPath := store.StepFile(run.RunID, stepIndex, step.ID, persistence.StdoutLog)
 	stderrPath := store.StepFile(run.RunID, stepIndex, step.ID, persistence.StderrLog)
 	combinedPath := store.StepFile(run.RunID, stepIndex, step.ID, persistence.CombinedLog)
 
+	addLogCloseError := func(file *os.File) {
+		if closeError := file.Close(); closeError != nil {
+			runError = errors.Join(runError, fmt.Errorf("%w: %w", errStepLogWrite, closeError))
+			message = runError.Error()
+		}
+	}
 	stdoutFile, err := os.Create(stdoutPath)
 	if err != nil {
-		return err, nil, err.Error()
+		return fmt.Errorf("%w: %w", errStepLogWrite, err), nil, err.Error()
 	}
-	defer func() {
-		_ = stdoutFile.Close()
-	}()
+	defer addLogCloseError(stdoutFile)
 	stderrFile, err := os.Create(stderrPath)
 	if err != nil {
-		return err, nil, err.Error()
+		return fmt.Errorf("%w: %w", errStepLogWrite, err), nil, err.Error()
 	}
-	defer func() {
-		_ = stderrFile.Close()
-	}()
+	defer addLogCloseError(stderrFile)
 	combinedFile, err := os.Create(combinedPath)
 	if err != nil {
-		return err, nil, err.Error()
+		return fmt.Errorf("%w: %w", errStepLogWrite, err), nil, err.Error()
 	}
-	defer func() {
-		_ = combinedFile.Close()
-	}()
+	defer addLogCloseError(combinedFile)
 
-	cmd := exec.CommandContext(ctx, step.Command[0], step.Command[1:]...)
+	commandContext, cancelCommand := context.WithCancel(ctx)
+	defer cancelCommand()
+	// Stdout and stderr copy concurrently; retain the first disk error safely.
+	var firstLogWriteError error
+	var logWriteErrorOnce sync.Once
+	addLogWriteError := func(writeError error) {
+		logWriteErrorOnce.Do(func() { firstLogWriteError = writeError })
+		cancelCommand()
+	}
+	cmd := exec.CommandContext(commandContext, step.Command[0], step.Command[1:]...)
 	cmd.Dir = resolveStepDir(run.Meta.RepoRoot, step.Dir)
 	cmd.Env = stepEnv(run, stepIndex, step)
-	cmd.Stdout = multiWriter(stdoutFile, combinedFile, stdout)
-	cmd.Stderr = multiWriter(stderrFile, combinedFile, stderr)
-	removeProcessCancellation := addProcessCancellation(ctx, cmd, forceStop)
+	stdoutLog := stepLogWriter{file: stdoutFile, addWriteError: addLogWriteError}
+	stderrLog := stepLogWriter{file: stderrFile, addWriteError: addLogWriteError}
+	combinedLog := stepLogWriter{file: combinedFile, addWriteError: addLogWriteError}
+	cmd.Stdout = multiWriter(stdoutLog, combinedLog, stdout)
+	cmd.Stderr = multiWriter(stderrLog, combinedLog, stderr)
+	removeProcessCancellation := addProcessCancellation(commandContext, cmd, forceStop)
 	defer removeProcessCancellation()
 
 	err = cmd.Run()
-	switch {
-	case err == nil:
-		exitCode := 0
-		return nil, &exitCode, ""
-	default:
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode := exitErr.ExitCode()
-			return err, &exitCode, fmt.Sprintf("exit code %d", exitCode)
-		}
-		return err, nil, err.Error()
+	// Cmd.Run may prefer an exit error over its copy error; local log failures win.
+	if firstLogWriteError != nil {
+		return firstLogWriteError, nil, firstLogWriteError.Error()
 	}
+	if err == nil {
+		commandExitCode := 0
+		return nil, &commandExitCode, ""
+	}
+	var commandExitError *exec.ExitError
+	if errors.As(err, &commandExitError) {
+		commandExitCode := commandExitError.ExitCode()
+		return err, &commandExitCode, fmt.Sprintf("exit code %d", commandExitCode)
+	}
+	return err, nil, err.Error()
 }
 
-func classifyStepState(runContext context.Context, runError error) StepState {
-	if runError == nil {
-		return StepStateSuccess
+// classifyStepState decides how a finished command is recorded. A passed deadline explains only a
+// failed command: one that already exited cleanly stays successful even if its deadline then passed.
+func classifyStepState(runContext context.Context, commandContext context.Context, runError error) (state StepState, timedOut bool) {
+	switch {
+	case runError == nil:
+		return StepStateSuccess, false
+	case runContext.Err() != nil:
+		return StepStateInterrupted, false
+	default:
+		return StepStateFailure, errors.Is(commandContext.Err(), context.DeadlineExceeded)
 	}
-	if runContext.Err() != nil {
-		return StepStateInterrupted
-	}
-	return StepStateFailure
 }
 
 func getInterruptionMessage(runContext context.Context) string {
@@ -342,7 +345,7 @@ func postPendingAggregateStatus(
 		return nil
 	}
 	postError := postAggregateStatus(runContext, reporter, appender, meta, ghstatus.StatePending, at)
-	if postError != nil && runContext.Err() != nil {
+	if isGitHubPostFailure(postError) && runContext.Err() != nil {
 		return nil
 	}
 	return postError
@@ -360,21 +363,24 @@ func postStepPendingStatusDuringRun(
 		return nil
 	}
 	postError := postStepPendingStatus(runContext, reporter, appender, meta, status, at)
-	if postError != nil && runContext.Err() != nil {
+	if isGitHubPostFailure(postError) && runContext.Err() != nil {
 		return nil
 	}
 	return postError
 }
 
-func postStepTerminalStatusDuringRun(
+// A running step can share a context with a failed sibling; post the combined
+// context state, not necessarily pending or the triggering step's own state.
+func postStepStatusDuringRun(
 	runContext context.Context,
 	reporter ghstatus.Reporter,
 	appender *events.Appender,
 	meta persistence.Meta,
 	status persistence.StepStatus,
 	at time.Time,
+	finalReportContext context.Context,
 ) error {
-	return postTerminalStatusDuringRun(runContext, func(reportContext context.Context) error {
+	return postTerminalStatusDuringRun(runContext, finalReportContext, func(reportContext context.Context) error {
 		return postStepTerminalStatus(reportContext, reporter, appender, meta, status, at)
 	})
 }
@@ -386,29 +392,27 @@ func postFinalAggregateStatus(
 	meta persistence.Meta,
 	state ghstatus.State,
 	at time.Time,
+	finalReportContext context.Context,
 ) error {
-	return postTerminalStatusDuringRun(runContext, func(reportContext context.Context) error {
+	return postTerminalStatusDuringRun(runContext, finalReportContext, func(reportContext context.Context) error {
 		return postAggregateStatus(reportContext, reporter, appender, meta, state, at)
 	})
 }
 
-func postTerminalStatusDuringRun(runContext context.Context, postStatus func(context.Context) error) error {
-	if runContext.Err() == nil {
-		postError := postStatus(runContext)
-		if postError == nil || runContext.Err() == nil {
-			return postError
-		}
+func postTerminalStatusDuringRun(runContext, finalReportContext context.Context, postStatus func(context.Context) error) error {
+	if runContext.Err() != nil {
+		return postStatus(finalReportContext)
 	}
-
-	// Terminal reporting must outlive canceled work but must not hang shutdown.
-	reportContext, cancelReport := context.WithTimeout(context.WithoutCancel(runContext), finalReportTimeout)
-	defer cancelReport()
-	// The step's own artifacts are already written, so the only outcome worth
-	// reporting back is a remote failure the caller still has to record.
-	if postError := postStatus(reportContext); isGitHubPostFailure(postError) {
+	postError := postStatus(runContext)
+	if postError == nil || runContext.Err() == nil {
 		return postError
 	}
-	return nil
+	// Cancellation may justify another remote attempt, never another receipt write.
+	if !isGitHubPostFailure(postError) && !errors.Is(postError, context.Canceled) {
+		return postError
+	}
+	// Every caller supplies the same budget created by ExecuteRun.
+	return postStatus(finalReportContext)
 }
 
 func executionOrder(plan config.ResolvedPlan) ([]int, error) {
@@ -455,7 +459,7 @@ func blockedByDependencies(statuses []persistence.StepStatus, needs []string) (b
 	}
 
 	for _, need := range needs {
-		if stateByID[need] != string(StepStateSuccess) {
+		if stateByID[need] != string(StepStateSuccess) && stateByID[need] != string(StepStateSkipped) {
 			return true, fmt.Sprintf("blocked by %s=%s", need, stateByID[need])
 		}
 	}
@@ -469,7 +473,12 @@ func shouldSkipStep(step config.Step) bool {
 
 func resolveNow(now func() time.Time) func() time.Time {
 	if now != nil {
-		return func() time.Time { return now().UTC() }
+		var clockLock sync.Mutex
+		return func() time.Time {
+			clockLock.Lock()
+			defer clockLock.Unlock()
+			return now().UTC()
+		}
 	}
 	return func() time.Time { return time.Now().UTC() }
 }
@@ -598,7 +607,9 @@ func persistStepStatus(store persistence.Store, runID string, stepIndex int, sta
 }
 
 func persistSummary(store persistence.Store, run *RunRecord, finishedAt *time.Time) error {
-	run.Summary = buildSummary(run.RunID, run.StepStatuses, run.Meta.StartedAt, finishedAt)
+	meta := run.Meta
+	meta.FinishedAt = finishedAt
+	run.Summary = BuildRunSummary(meta, run.StepStatuses)
 	if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.SummaryFile), run.Summary); err != nil {
 		return err
 	}
@@ -610,6 +621,7 @@ func persistSummary(store persistence.Store, run *RunRecord, finishedAt *time.Ti
 
 func setRunningState(status *persistence.StepStatus, startedAt time.Time) {
 	status.State = string(StepStateRunning)
+	status.Message = ""
 	status.StartedAt = &startedAt
 	status.FinishedAt = nil
 	status.DurationMillis = 0

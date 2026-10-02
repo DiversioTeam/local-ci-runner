@@ -30,14 +30,17 @@ func TestHelpSurfaces(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name string
-		args []string
-		want string
+		name  string
+		args  []string
+		want  string
+		flags []string
 	}{
 		{name: "top level", args: nil, want: "local-ci runs repo-owned verification steps"},
 		{name: "top level flag", args: []string{"--help"}, want: "Main commands:"},
-		{name: "run", args: []string{"run", "--help"}, want: "Usage:\n  local-ci run"},
-		{name: "resume", args: []string{"resume", "--help"}, want: "Usage:\n  local-ci resume"},
+		{name: "run", args: []string{"run", "--help"}, want: "Usage:\n  local-ci run", flags: []string{"--json", "--max-parallel", "--no-github"}},
+		{name: "resume", args: []string{"resume", "--help"}, want: "Usage:\n  local-ci resume", flags: []string{"--json", "--max-parallel", "--from-step"}},
+		{name: "plan", args: []string{"plan", "--help"}, want: "Usage:\n  local-ci plan", flags: []string{"--json", "--max-parallel"}},
+		{name: "plan alias", args: []string{"help", "plan"}, want: "Usage:\n  local-ci plan"},
 		{name: "runs", args: []string{"runs", "--help"}, want: "Usage:\n  local-ci runs"},
 		{name: "show", args: []string{"show", "--help"}, want: "Works for both active and finished runs."},
 		{name: "publish", args: []string{"publish", "--help"}, want: "Usage:\n  local-ci publish <run-id>"},
@@ -59,6 +62,11 @@ func TestHelpSurfaces(t *testing.T) {
 			if got := stdout.String(); !strings.Contains(got, testCase.want) {
 				t.Fatalf("stdout = %q, want substring %q", got, testCase.want)
 			}
+			for _, flag := range testCase.flags {
+				if !strings.Contains(stdout.String(), flag) {
+					t.Fatalf("help does not document %s", flag)
+				}
+			}
 		})
 	}
 }
@@ -75,18 +83,54 @@ func TestManualRejectsUnexpectedArgs(t *testing.T) {
 	}
 }
 
-func TestParseExecutionArgsSupportsNoGitHub(t *testing.T) {
+func TestParseExecutionArgs(t *testing.T) {
 	t.Parallel()
 
-	opts, err := parseExecutionArgs([]string{"--config", "alt.toml", "--no-github"}, false)
-	if err != nil {
-		t.Fatalf("parseExecutionArgs() error = %v", err)
+	for _, test := range []struct {
+		args      []string
+		want      executionCLIOptions
+		wantError string
+	}{
+		{args: []string{"--config", "alt.toml", "--no-github"}, want: executionCLIOptions{configPath: "alt.toml", noGitHub: true}},
+		{args: []string{"--max-parallel=2", "--from-step", "lint", "--json"}, want: executionCLIOptions{configPath: config.DefaultPath, maxParallel: 2, fromStep: "lint", json: true}},
+		{args: []string{"--max-parallel"}, wantError: "positive integer"},
+		{args: []string{"--max-parallel", "0"}, wantError: "positive integer"},
+		{args: []string{"--max-parallel=-1"}, wantError: "positive integer"},
+		{args: []string{"--max-parallel=auto"}, wantError: "positive integer"},
+		{args: []string{"--from-step="}, wantError: "--from-step"},
+	} {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			got, err := parseExecutionArgs(test.args, false)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("error = %v, want %q", err, test.wantError)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("options = %+v, error = %v; want %+v", got, err, test.want)
+			}
+		})
 	}
-	if got, want := opts.configPath, "alt.toml"; got != want {
-		t.Fatalf("configPath = %q, want %q", got, want)
-	}
-	if !opts.noGitHub {
-		t.Fatal("expected noGitHub=true")
+}
+
+func TestExecutionCommandsRejectFlagsTheyCannotHonor(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		args      []string
+		wantError string
+	}{
+		{args: []string{"run", "--from-step", "lint"}, wantError: "supported only by resume"},
+		{args: []string{"plan", "--no-github"}, wantError: "plan accepts"},
+		{args: []string{"plan", "--from-step", "lint"}, wantError: "plan accepts"},
+	} {
+		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
+			err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, t.TempDir()).run(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -202,7 +246,7 @@ func TestValidatePublishableRunRejectsAlreadyPostedRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if got, want := err.Error(), "already posted to GitHub"; !strings.Contains(got, want) {
+	if got, want := err.Error(), "configured to post during execution"; !strings.Contains(got, want) {
 		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }
@@ -477,7 +521,8 @@ func TestJSONModes(t *testing.T) {
 	}
 }
 
-func newCLIFixture(t *testing.T) cliFixture {
+// newGitRepo returns a committed GitHub-remote repository with a static config.
+func newGitRepo(t *testing.T) string {
 	t.Helper()
 
 	repoRoot := t.TempDir()
@@ -489,7 +534,14 @@ func newCLIFixture(t *testing.T) cliFixture {
 	runGit(t, repoRoot, "commit", "-m", "init")
 	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
 	writeFile(t, filepath.Join(repoRoot, config.DefaultPath), []byte("version = 1\n"))
+	return repoRoot
+}
 
+// newCLIFixture adds a finished run and an active run for inspection commands.
+func newCLIFixture(t *testing.T) cliFixture {
+	t.Helper()
+
+	repoRoot := newGitRepo(t)
 	store := persistence.NewStore(repoRoot)
 	headSHA := gitOutput(t, repoRoot, "rev-parse", "HEAD")
 	configPath := filepath.Join(repoRoot, config.DefaultPath)

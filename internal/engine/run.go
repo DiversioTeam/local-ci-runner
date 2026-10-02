@@ -21,6 +21,7 @@ type PrepareOptions struct {
 	Identity                RunIdentity
 	Plan                    config.ResolvedPlan
 	GitHub                  config.GitHub
+	MaxParallel             int
 	PlannerLog              string
 	HeadTreeHash            string
 	WorktreeTreeHash        string
@@ -45,6 +46,12 @@ func PrepareRun(store persistence.Store, opts PrepareOptions) (RunRecord, error)
 		return RunRecord{}, err
 	}
 	githubConfig := normalizeGitHubConfig(opts.GitHub)
+	if opts.MaxParallel < 0 {
+		return RunRecord{}, fmt.Errorf("max_parallel must be a positive integer")
+	}
+	if opts.MaxParallel == 0 {
+		opts.MaxParallel = 1
+	}
 
 	plan := config.ResolvedPlan{
 		Env:   cloneStringMap(opts.Plan.Env),
@@ -82,6 +89,7 @@ func PrepareRun(store persistence.Store, opts PrepareOptions) (RunRecord, error)
 		GitHubEnabled:           githubConfig.Enabled,
 		GitHubAggregateContext:  githubConfig.AggregateContext,
 		CreatedAt:               now,
+		MaxParallel:             opts.MaxParallel,
 		HeadTreeHash:            opts.HeadTreeHash,
 		WorktreeTreeHash:        opts.WorktreeTreeHash,
 		DirtyWorktree:           opts.DirtyWorktree,
@@ -331,6 +339,9 @@ func validateStepStatusAgainstExpected(actual persistence.StepStatus, expected p
 	if !sameStrings(actual.Needs, expected.Needs) {
 		return fmt.Errorf("stored step dependencies do not match persisted plan for %q", expected.StepID)
 	}
+	if actual.Timeout != expected.Timeout {
+		return fmt.Errorf("stored step timeout does not match persisted plan for %q", expected.StepID)
+	}
 	if actual.GitHubContext != expected.GitHubContext {
 		return fmt.Errorf("stored step GitHub context does not match persisted plan for %q", expected.StepID)
 	}
@@ -421,7 +432,10 @@ func validateStepStateSemantics(status persistence.StepStatus, stepID string) er
 }
 
 func validateStoredSummary(meta persistence.Meta, summary persistence.Summary, statuses []persistence.StepStatus) error {
-	expected := buildSummary(meta.RunID, statuses, meta.StartedAt, meta.FinishedAt)
+	if meta.MaxParallel < 0 {
+		return fmt.Errorf("stored max_parallel must be a positive integer or absent for a legacy run")
+	}
+	expected := BuildRunSummary(meta, statuses)
 	if summary.RunID != expected.RunID {
 		return fmt.Errorf("%w: run id does not match run metadata", ErrStoredSummaryMismatch)
 	}
@@ -442,6 +456,15 @@ func validateStoredSummary(meta persistence.Meta, summary persistence.Summary, s
 	}
 
 	return nil
+}
+
+// BuildRunSummary uses the same persisted facts for execution and inspection.
+func BuildRunSummary(meta persistence.Meta, statuses []persistence.StepStatus) persistence.Summary {
+	summary := buildSummary(meta.RunID, statuses, meta.StartedAt, meta.FinishedAt)
+	if meta.Interrupted && meta.FinishedAt != nil {
+		summary.Status = string(StepStateInterrupted)
+	}
+	return summary
 }
 
 func buildSummary(runID string, statuses []persistence.StepStatus, startedAt *time.Time, finishedAt *time.Time) persistence.Summary {
@@ -515,6 +538,7 @@ func renderSummaryText(runDir string, meta persistence.Meta, summary persistence
 	builder.WriteString(runDir)
 	builder.WriteByte('\n')
 	builder.WriteString("publication: inspect local-ci logs " + meta.RunID + " --runner --json (this index is not a publication receipt)\n")
+	fmt.Fprintf(&builder, "max_parallel: %d\n", max(1, meta.MaxParallel))
 
 	if summary.StartedAt != nil {
 		builder.WriteString("started: ")
@@ -590,6 +614,9 @@ func renderSummaryText(runDir string, meta persistence.Meta, summary persistence
 		}
 		builder.WriteString(" -> ")
 		builder.WriteString(filepath.Join(runDir, status.CombinedLog))
+		if status.Message != "" {
+			builder.WriteString(" (" + status.Message + ")")
+		}
 		builder.WriteByte('\n')
 	}
 
@@ -670,6 +697,7 @@ func expectedStepStatus(step config.Step, index int) persistence.StepStatus {
 		Index:         index + 1,
 		Needs:         cloneStrings(step.Needs),
 		GitHubContext: step.EffectiveGitHubContext(),
+		Timeout:       step.Timeout,
 		StdoutLog:     persistence.StepRelPath(index, step.ID, persistence.StdoutLog),
 		StderrLog:     persistence.StepRelPath(index, step.ID, persistence.StderrLog),
 		CombinedLog:   persistence.StepRelPath(index, step.ID, persistence.CombinedLog),

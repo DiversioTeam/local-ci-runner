@@ -42,6 +42,8 @@ env = { MODE = "fast" }
 ### Rules
 
 - `version` is required and currently must be `1`.
+- Top-level `max_parallel` is a positive integer, default `1`; it is not a GitHub setting. `run/resume --max-parallel` can override it without changing the selected plan.
+- Step `timeout` is an optional positive Go duration such as `10m`; omitted means no deadline. A timeout fails only that step and stops its process group.
 - `planner.command` is optional.
 - `[[steps]]` is required when no planner is configured.
 - `[planner]` and `[[steps]]` are mutually exclusive in v1.
@@ -50,7 +52,9 @@ env = { MODE = "fast" }
 - `id` must be unique.
 - `command` is always an argv array, not a shell string.
 - `dir` is repo-root relative unless absolute.
-- `needs` is a small DAG only.
+- `needs` is a small DAG only. Successful and skipped dependencies satisfy it; failed or blocked dependencies block dependents. Independent branches continue after check failures.
+- Steps become ready only after all dependencies are complete, including reused successes. Ties follow the same stable topological order used by serial execution. Completion order may vary.
+- Consumer repos must order steps sharing databases, generated files, build directories, or other mutable resources; missing dependency edges are not proof of resource independence.
 - `github_context` is optional; if missing, the runner defaults to `local/<step-id>`.
 - `if` currently supports only `true` and `false`.
 
@@ -118,6 +122,16 @@ If a step writes `KEY=VALUE` lines to `LOCAL_CI_STEP_OUTPUT`, the runner persist
 
 v1 rule: step outputs are for auditability and explicit later consumption, not hidden implicit wiring between steps.
 
+### Parallel output and ownership
+
+The scheduler alone writes statuses, summaries, events, and GitHub receipts. Workers own subprocesses and their isolated logs. At `max_parallel > 1`, child output stays in step logs rather than producing interleaved terminal transcripts; progress identifies step IDs and exact failing log paths. At `max_parallel = 1`, raw child output streams live unless `--json` is set.
+
+`run/resume --json` writes one final object with the same schema as `show --json`, including unsuccessful/interrupted results. Child output remains in logs and progress goes to stderr. Usage/preparation/persistence errors may exit without a final JSON object.
+
+`plan [--json]` executes the planner but not verification steps, creates no run artifacts, and posts no statuses. It exposes snapshot/config/plan identity, `max_parallel`, and the complete plan. Planner code may have side effects; this is not guaranteed read-only inspection. Preparation refuses changes to repository identity, HEAD, worktree snapshot, or configuration during planning, before starting checks or creating a run. Generated outputs must use ignored or runner-artifact paths.
+
+`resume --from-step <id>` records stale events and refreshes pending contexts for that step and all dependents, then reruns them while reusing unrelated successes. Other unfinished/failed work is also reconsidered. No partial-plan verification command is provided.
+
 ## 4. Run artifacts
 
 ```text
@@ -154,6 +168,8 @@ Stores immutable run identity and the trust snapshot for that run:
 - `dirty_worktree`
 - `dirty_files[]` with path, status, and blob hash when known
 - `github_posting_suppressed` when the run skipped GitHub posting or stopped after a post failure
+- `max_parallel`: actual worker limit for this execution; absent/zero in legacy metadata means `1`
+- `interrupted`: run cancellation, including before any step starts; absent means false
 
 Known suppression reasons are `dirty_worktree`, `cli_disabled`, and `post_failed`.
 
@@ -172,6 +188,7 @@ Stores per-step execution facts:
 - exit code
 - log paths
 - GitHub context
+- optional `timeout` copied from the plan and `message` explaining failure, timeout, interruption, skip, or blocking
 
 Canonical terminal states:
 - `success`
@@ -183,7 +200,7 @@ Canonical terminal states:
 
 Transient runtime phases like `pending` and `running` are allowed in memory and events.
 
-`interrupted` means SIGINT or SIGTERM canceled step execution. The run records
+`interrupted` means SIGINT or SIGTERM canceled step execution. New launches stop and every active process group is canceled. The run records
 a finish time, leaves work that never started as `pending`, and reruns all
 non-successful work on `resume`.
 
@@ -227,7 +244,7 @@ Resume does **not** use that fallback. Resume stays fail-closed.
 
 ## 5. Event stream
 
-`events.jsonl` is append-only. Each line is one JSON object.
+`events.jsonl` is append-only. Each line is one JSON object. `sequence` defines persistence order. Worker finish timestamps are captured before result collection, so event times need not increase under parallel execution; step durations do not include time waiting for the scheduler to collect a completed result.
 
 Core fields:
 - `sequence`
@@ -300,14 +317,15 @@ Never a parent repo, sibling worktree, cached stale SHA, or a commit whose tree 
 
 ### Lifecycle
 
-- aggregate: `pending` at run start, terminal at run end
+- aggregate: `pending` at run start, terminal at run end. The run owns this context even when a step uses the same name; per-step posts cannot overwrite it.
 - step: `pending` before execution, terminal on completion
 - interrupted step and aggregate contexts post GitHub state `error`
-- final interruption posts use a fresh bounded context because the execution context is already canceled
+- final interruption posts share one five-second run-wide shutdown budget because the execution context is already canceled
+- a shared per-step context cannot pass until all its steps finish; a known failure/error is reported without waiting for siblings and cannot be overwritten by their success. Explicit publication posts each unique context once using the combined result.
 - the first remote post failure appends `github.status.failed`, persists `post_failed`, and disables later posts without stopping local execution
 - a run suppressed by `post_failed` can use `local-ci publish <run-id>` after auth or connectivity is fixed
-- successful publication clears the suppression marker so later publication attempts are refused
-- during ordinary execution, local artifact or event-write failures remain fatal
+- publication leaves original metadata unchanged; explicit retries append new receipts and may duplicate remote statuses
+- local artifact or event-write failures remain fatal, including receipt writes during cancellation
 - rerun-from-step must refresh affected step contexts and the aggregate context
 
 On the first SIGINT or SIGTERM, the runner cancels the run and gives each active
@@ -338,7 +356,7 @@ Receipts are historical acknowledgement, not live status, GitHub commit
 existence checks, current-worktree validation, or deployment authorization.
 
 Writers refuse torn event tails rather than silently repairing records.
-Use one writer per run; concurrent execution/publication is unsupported.
+Use one CLI writer per run; concurrent run/resume/publish commands targeting the same run are unsupported. Parallel step workers inside that writer are supported.
 Local artifacts are not signed attestations against manual edits. Explicit
 publish retries append records and may duplicate remote statuses; no automatic
 retry behavior is added. Existing publish/resume eligibility checks remain.
