@@ -964,7 +964,7 @@ Planner stdout must be one JSON plan, for example:
 ```
 
 The planner owns selection and may return zero steps. Step fields follow the
-same rules as static config. Write debug output to stderr, not stdout. Planner
+same rules as static config: unknown fields and trailing output are rejected. Write debug output to stderr, not stdout. Planner
 code must not modify previous run artifacts. Run-scoped plan env is persisted
 and merged into step environments; step env overrides plan env, and runner
 identity variables override both. Planner execution can have side effects,

@@ -56,7 +56,7 @@ env = { MODE = "fast" }
 
 ## 2. Planner stdout
 
-If a planner is configured, stdout must be valid JSON:
+If a planner is configured, stdout must be exactly one JSON object. Unknown fields and trailing data are rejected, as in static config, so a misspelled `needs` cannot silently drop an ordering edge:
 
 ```json
 {
