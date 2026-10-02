@@ -267,7 +267,7 @@ Initial event types:
 - `github.status.posted`
 - `github.status.failed`
 
-A `github.status.failed` message records the attempted context/state and the reporter error.
+A `github.status.failed` message records the attempted context and state. The reporter error is returned to the caller, not persisted.
 
 Reader rule for active runs:
 - parse every complete line
