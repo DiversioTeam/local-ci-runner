@@ -3,6 +3,7 @@ package events
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,5 +49,32 @@ func TestAppenderRefusesTornTail(t *testing.T) {
 	}
 	if _, err := NewAppender(path, "run-1"); err == nil {
 		t.Fatal("writer accepted a torn event log")
+	}
+}
+
+// A step's failure message can quote a long output.env line into the log. Reopening the log
+// for resume or publish must still work, or the run can never be resumed or published.
+func TestAppenderReopensLogWithLongLines(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	at := time.Date(2026, 6, 29, 0, 0, 0, 0, time.UTC)
+	appender, err := NewAppender(path, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appender.Append(at, StepFinished, "emit", "failure", strings.Repeat("x", 70_000)); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewAppender(path, "run-1")
+	if err != nil {
+		t.Fatalf("reopen after a 70 KB event: %v", err)
+	}
+	if err := reopened.Append(at, RunFinished, "", "failure", ""); err != nil {
+		t.Fatal(err)
+	}
+	items, err := ReadFile(path)
+	if err != nil || len(items) != 2 || items[1].Sequence != 2 {
+		t.Fatalf("events = %d, error = %v", len(items), err)
 	}
 }
