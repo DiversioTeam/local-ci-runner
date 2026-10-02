@@ -169,6 +169,19 @@ func TestDiscoverSnapshotsLocalChanges(t *testing.T) {
 	}
 }
 
+// A branch created with --track from a local branch records "." as its remote.
+func TestDiscoverResolvesSlugOnBranchTrackingLocalBranch(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := newCommittedRepo(t)
+	runGit(t, repoRoot, "checkout", "-b", "feature", "--track", gitOutputForTest(t, repoRoot, "branch", "--show-current"))
+
+	info, err := Discover(t.Context(), repoRoot)
+	if err != nil || info.RepoSlug != "owner/repo" {
+		t.Fatalf("slug = %q, error = %v", info.RepoSlug, err)
+	}
+}
+
 // Consumer repos need not gitignore runner artifacts: the runner filters its own directory.
 func TestDiscoverIgnoresLocalCIArtifacts(t *testing.T) {
 	t.Parallel()

@@ -140,7 +140,8 @@ func repoRemoteName(ctx context.Context, repoRoot string) (string, error) {
 	branch, err := gitOutput(ctx, repoRoot, "branch", "--show-current")
 	if err == nil && branch != "" {
 		remoteName, remoteErr := gitOutput(ctx, repoRoot, "config", "--get", "branch."+branch+".remote")
-		if remoteErr == nil && remoteName != "" {
+		// "." means the branch tracks another local branch, so it names no remote repository.
+		if remoteErr == nil && remoteName != "" && remoteName != "." {
 			return remoteName, nil
 		}
 	}
