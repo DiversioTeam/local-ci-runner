@@ -96,7 +96,8 @@ It answers:
 - did this run execute on a dirty worktree?
 - what exact tree snapshot produced this run?
 - which files were dirty when the run started?
-- which step is running now?
+- which steps are running now?
+- what worker limit was used, and which steps have timeouts?
 - which steps were interrupted, failed, blocked, or went stale?
 - which log file should I open next?
 
@@ -106,6 +107,10 @@ Example:
 local-ci show 20260627T150405Z-deadbeef
 local-ci show 20260627T150405Z-deadbeef --json
 ```
+
+### Elapsed time and estimates
+
+For a running step, elapsed time is current time minus `started_at`; its `duration_millis` is not a live counter. Run `started_at` is retained across resume, so total run elapsed/duration includes pauses and previous attempts. Use the most recent `run.started` event in `logs --runner --json` for current-attempt elapsed time. There is no built-in ETA or internal test percentage; logs and comparable prior step durations can support an explicitly approximate estimate.
 
 ### Publication inspection
 
@@ -259,6 +264,14 @@ Why this is safe:
 
 ## Suggested debugging flows
 
+### Preview a plan (executes repo code; requires authorization)
+
+```bash
+local-ci plan --json
+```
+
+This creates no run and posts no statuses, but a planner can write files or contact services. Inspect `max_parallel`, step `needs`, `timeout`, and shared contexts before executing. A preview is not evidence that verification passed.
+
 ### A run is still in progress
 
 ```bash
@@ -276,7 +289,10 @@ local-ci logs <run-id>
 local-ci logs <run-id> --step <failing-or-interrupted-step-id>
 local-ci logs <run-id> --step <failing-or-interrupted-step-id> --stderr
 local-ci resume <run-id> # when the stored identity still matches
+local-ci resume <run-id> --from-step <step-id> --max-parallel 1 --json
 ```
+
+For configured parallel runs, raw child output stays in per-step logs rather than being mixed on the terminal. `run/resume --json` returns the same snapshot schema as `show --json`; progress stays on stderr. A step timeout is a failed check with an explanatory message, not operator interruption.
 
 ### I need to know whether an old local run is still trustworthy
 

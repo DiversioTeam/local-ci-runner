@@ -7,10 +7,11 @@ const (
 )
 
 type File struct {
-	Version int      `toml:"version" json:"version"`
-	Planner *Planner `toml:"planner" json:"planner,omitempty"`
-	GitHub  GitHub   `toml:"github" json:"github"`
-	Steps   []Step   `toml:"steps" json:"steps,omitempty"`
+	Version     int      `toml:"version" json:"version"`
+	MaxParallel int      `toml:"max_parallel" json:"max_parallel,omitempty"`
+	Planner     *Planner `toml:"planner" json:"planner,omitempty"`
+	GitHub      GitHub   `toml:"github" json:"github"`
+	Steps       []Step   `toml:"steps" json:"steps,omitempty"`
 }
 
 type Planner struct {
@@ -31,6 +32,7 @@ type Step struct {
 	Dir           string            `toml:"dir" json:"dir,omitempty"`
 	Needs         []string          `toml:"needs" json:"needs,omitempty"`
 	If            string            `toml:"if" json:"if,omitempty"`
+	Timeout       string            `toml:"timeout" json:"timeout,omitempty"`
 	GitHubContext string            `toml:"github_context" json:"github_context,omitempty"`
 	Env           map[string]string `toml:"env" json:"env,omitempty"`
 }
@@ -41,6 +43,9 @@ type ResolvedPlan struct {
 }
 
 func (f *File) ApplyDefaults() {
+	if f.MaxParallel == 0 {
+		f.MaxParallel = 1
+	}
 	if f.GitHub.AggregateContext == "" {
 		f.GitHub.AggregateContext = DefaultAggregateContext
 	}
@@ -107,6 +112,7 @@ func cloneStep(step Step) Step {
 		Dir:           step.Dir,
 		Needs:         cloneStrings(step.Needs),
 		If:            step.If,
+		Timeout:       step.Timeout,
 		GitHubContext: step.GitHubContext,
 		Env:           cloneStringMap(step.Env),
 	}

@@ -1,4 +1,5 @@
 version = 1
+max_parallel = 3
 
 [github]
 enabled = true
@@ -21,7 +22,7 @@ github_context = "local/vet"
 [[steps]]
 id = "test"
 name = "go test"
-command = ["go", "test", "./..."]
+command = ["go", "test", "-race", "./..."]
 needs = ["fmt"]
 github_context = "local/test"
 

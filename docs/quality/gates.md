@@ -9,6 +9,7 @@ Run these before pushing:
 ```bash
 gofmt -w cmd internal
 go test ./...
+go test -race ./...
 go vet ./...
 ```
 
@@ -31,6 +32,8 @@ go run ./cmd/local-ci manual
   They verify embedded schema documentation against the compiled contract.
   CLI tests verify existing runner-log JSON exposes receipt fields without
   mutating inspected artifacts.
+- `go test -race ./...` covers worker limits, ready-step ordering, skipped dependencies, sibling failures, shared GitHub contexts, timeout/interruption, resume/rerun, and isolated logs. Worker limits and dependency order are read back from the persisted event sequence, not from timing. Fatal persistence errors are proven to cancel and join every worker. The log write-failure row needs `/dev/full`, so it runs on Linux, including release CI, and skips on macOS.
+- CLI tests verify plan preview creates no run/executes no steps, rejects planner changes to HEAD/source/config, execution JSON never mixes child output, and unsuccessful results remain inspectable. Reporting tests cover aggregate-context collisions, fatal receipt writes during cancellation, and immediate failure-log progress before remote posts. Compiled-binary tests cover discovery without source or Git.
 - `go vet ./...` catches suspicious Go patterns.
 
 ## Release CI
@@ -42,6 +45,7 @@ That workflow currently enforces:
 ```bash
 test -z "$(gofmt -l cmd internal)"
 go test ./...
+go test -race ./...
 go vet ./...
 ```
 

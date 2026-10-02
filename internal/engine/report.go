@@ -125,6 +125,25 @@ func postStepTerminalStatus(
 	return postGitHubStatus(ctx, reporter, appender, meta, status.StepID, githubStatus, at)
 }
 
+// A shared context passes only when every step using it passed or was skipped.
+func getContextStepStatus(statuses []persistence.StepStatus, changedStatus persistence.StepStatus) persistence.StepStatus {
+	statePriority := map[ghstatus.State]int{
+		ghstatus.StateSuccess: 0,
+		ghstatus.StatePending: 1,
+		ghstatus.StateFailure: 2,
+		ghstatus.StateError:   3,
+	}
+	for _, status := range statuses {
+		if status.GitHubContext != changedStatus.GitHubContext {
+			continue
+		}
+		if statePriority[stepGitHubState(status.State)] > statePriority[stepGitHubState(changedStatus.State)] {
+			changedStatus.State = status.State
+		}
+	}
+	return changedStatus
+}
+
 func postGitHubStatus(
 	ctx context.Context,
 	reporter ghstatus.Reporter,
@@ -134,8 +153,19 @@ func postGitHubStatus(
 	status ghstatus.Status,
 	_ time.Time,
 ) error {
-	post := events.GitHubPost{Version: events.PublicationVersion, AttemptID: rand.Text(), Repo: meta.RepoSlug, SHA: meta.HeadSHA,
-		Context: status.Context, Source: appender.PublicationSource}
+	// The run owns its aggregate context, even when a step uses the same name.
+	if stepID != "" && status.Context == meta.GitHubAggregateContext {
+		return nil
+	}
+	post := events.GitHubPost{
+		Version:   events.PublicationVersion,
+		AttemptID: rand.Text(),
+		Repo:      meta.RepoSlug,
+		SHA:       meta.HeadSHA,
+		Context:   status.Context,
+		Source:    appender.PublicationSource,
+	}
+	// Save intent before contacting GitHub so an uncertain outcome stays visible.
 	if err := appender.AddGitHubPost(time.Now().UTC(), events.GitHubStatusRequested, stepID, string(status.State), post); err != nil {
 		return fmt.Errorf("record publication intent; no request sent: %w", err)
 	}

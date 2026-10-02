@@ -29,3 +29,4 @@ MANUAL.md   -> full binary/operator surface
 - `inspection.md` — `runs`, `show`, `logs`, `publish` from first principles
 - `quality/gates.md` — required commands, release workflow, common failure modes
 - `runbooks/development.md` — daily contributor loop, examples, release helper pointers
+- `plans/parallel-execution.md` — current baseline, parallel scheduling, consumer isolation, verification, and release rollout checklist

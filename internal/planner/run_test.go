@@ -56,16 +56,27 @@ func TestExecutePlannerReturnsCancellationCause(t *testing.T) {
 func TestExecutePlannerRejectsInvalidOutput(t *testing.T) {
 	t.Parallel()
 
-	repoRoot := t.TempDir()
-	scriptPath := filepath.Join(repoRoot, "planner.sh")
-	writeExecutable(t, scriptPath, "#!/bin/sh\nprintf 'not-json\\n'\n")
+	for _, test := range []struct {
+		name   string
+		output string
+	}{
+		{name: "not JSON", output: "not-json"},
+		// A misspelled field would silently drop the ordering edge between parallel steps.
+		{name: "unknown step field", output: `{"steps":[{"id":"a","command":["true"]},{"id":"b","command":["true"],"need":["a"]}]}`},
+		{name: "trailing document", output: `{"steps":[]}{"steps":[]}`},
+		{name: "trailing delimiter", output: `{"steps":[]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			repoRoot := t.TempDir()
+			scriptPath := filepath.Join(repoRoot, "planner.sh")
+			writeExecutable(t, scriptPath, "#!/bin/sh\nprintf '%s\\n' '"+test.output+"'\n")
 
-	_, err := Execute(t.Context(), repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "decode planner output") {
-		t.Fatalf("error = %v", err)
+			_, err := Execute(t.Context(), repoRoot, "owner/repo", "abc123", filepath.Join(repoRoot, config.DefaultPath), config.Planner{Command: []string{scriptPath}})
+			if err == nil || !strings.Contains(err.Error(), "decode planner output") {
+				t.Fatalf("error = %v, want a decode failure", err)
+			}
+		})
 	}
 }
 

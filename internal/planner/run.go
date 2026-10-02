@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,9 +60,15 @@ func Execute(
 		return Result{}, fmt.Errorf("run planner: %s: %w", message, err)
 	}
 
+	// Reject unknown fields as static config does: a misspelled "needs" would drop an ordering edge.
 	var plan config.ResolvedPlan
-	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
+	decoder := json.NewDecoder(&stdout)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&plan); err != nil {
 		return Result{}, fmt.Errorf("decode planner output: %w", err)
+	}
+	if err := decoder.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		return Result{}, fmt.Errorf("decode planner output: expected one JSON object, found trailing data")
 	}
 	plan.ApplyDefaults()
 	if err := plan.Validate(); err != nil {

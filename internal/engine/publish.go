@@ -40,7 +40,7 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 		return fmt.Errorf("run %s was interrupted", run.RunID)
 	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
-		return fmt.Errorf("run %s already posted to GitHub", run.RunID)
+		return fmt.Errorf("run %s was configured to post during execution; publish requires a suppressed run (inspect receipts; configuration is not proof of publication)", run.RunID)
 	}
 	if strings.TrimSpace(opts.TargetSHA) == "" {
 		return fmt.Errorf("target SHA is required")
@@ -60,10 +60,16 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 	now := resolveNow(opts.Now)
 	at := now()
 
+	postedContexts := make(map[string]struct{})
 	for _, status := range run.StepStatuses {
-		if err := postStepTerminalStatus(ctx, opts.Reporter, &appender, meta, status, at); err != nil {
+		if _, posted := postedContexts[status.GitHubContext]; posted {
+			continue
+		}
+		contextStatus := getContextStepStatus(run.StepStatuses, status)
+		if err := postStepTerminalStatus(ctx, opts.Reporter, &appender, meta, contextStatus, at); err != nil {
 			return err
 		}
+		postedContexts[status.GitHubContext] = struct{}{}
 	}
 	// Publication deliberately leaves run metadata untouched: the run is the
 	// evidence of what was verified, and repeat publications are recorded as

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,8 +59,22 @@ type cli struct {
 }
 
 type executionCLIOptions struct {
-	configPath string
-	noGitHub   bool
+	configPath  string
+	noGitHub    bool
+	maxParallel int
+	json        bool
+	fromStep    string
+}
+
+// The captured repository, configuration, and plan travel together so every
+// CLI command validates and reports the same inputs.
+type planInputs struct {
+	repository    gitrepo.Info
+	configuration config.File
+	plan          config.ResolvedPlan
+	plannerLog    string
+	identity      engine.RunIdentity
+	store         persistence.Store
 }
 
 type runsOptions struct {
@@ -203,6 +218,12 @@ func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan st
 		}
 		c.maybePrintUpdateNotice(commandContext)
 		return c.publishCommand(commandContext, args[1:])
+	case "plan":
+		if hasHelpFlag(args[1:]) {
+			c.printPlanHelp()
+			return nil
+		}
+		return c.planCommand(commandContext, args[1:])
 	case "run":
 		if hasHelpFlag(args[1:]) {
 			c.printRunHelp()
@@ -258,6 +279,8 @@ func (c *cli) helpCommand(args []string) error {
 		c.printVersionHelp()
 	case "update":
 		c.printUpdateHelp()
+	case "plan":
+		c.printPlanHelp()
 	case "run":
 		c.printRunHelp()
 	case "resume":
@@ -279,21 +302,25 @@ func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct
 	if err != nil {
 		return err
 	}
+	if opts.fromStep != "" {
+		return fmt.Errorf("--from-step is supported only by resume; run executes the complete plan")
+	}
 
-	repo, cfg, plan, plannerLog, identity, store, err := prepareContext(commandContext, c.cwd, opts.configPath)
+	inputs, err := loadPlanInputs(commandContext, c.cwd, opts.configPath)
 	if err != nil {
 		return err
 	}
-	githubPostingSuppressed := suppressedGitHubPostingReason("", repo.DirtyWorktree, opts.noGitHub, cfg.GitHub.Enabled)
-	runRecord, err := engine.PrepareRun(store, engine.PrepareOptions{
-		Identity:                identity,
-		Plan:                    plan,
-		GitHub:                  cfg.GitHub,
-		PlannerLog:              plannerLog,
-		HeadTreeHash:            repo.HeadTreeHash,
-		WorktreeTreeHash:        repo.WorktreeTreeHash,
-		DirtyWorktree:           repo.DirtyWorktree,
-		DirtyFiles:              toPersistedWorktreeFiles(repo.DirtyFiles),
+	githubPostingSuppressed := suppressedGitHubPostingReason("", inputs.repository.DirtyWorktree, opts.noGitHub, inputs.configuration.GitHub.Enabled)
+	runRecord, err := engine.PrepareRun(inputs.store, engine.PrepareOptions{
+		Identity:                inputs.identity,
+		Plan:                    inputs.plan,
+		GitHub:                  inputs.configuration.GitHub,
+		MaxParallel:             getMaxParallel(inputs.configuration, opts),
+		PlannerLog:              inputs.plannerLog,
+		HeadTreeHash:            inputs.repository.HeadTreeHash,
+		WorktreeTreeHash:        inputs.repository.WorktreeTreeHash,
+		DirtyWorktree:           inputs.repository.DirtyWorktree,
+		DirtyFiles:              toPersistedWorktreeFiles(inputs.repository.DirtyFiles),
 		GitHubPostingSuppressed: githubPostingSuppressed,
 		Random:                  rand.Reader,
 	})
@@ -301,7 +328,7 @@ func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct
 		return err
 	}
 
-	return c.executeAndReport(commandContext, forceStop, repo, cfg, store, runRecord, opts.noGitHub)
+	return c.executeAndReport(commandContext, forceStop, inputs, runRecord, opts)
 }
 
 func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
@@ -310,17 +337,18 @@ func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan str
 		return err
 	}
 
-	repo, cfg, _, _, identity, store, err := prepareContext(commandContext, c.cwd, opts.configPath)
+	inputs, err := loadPlanInputs(commandContext, c.cwd, opts.configPath)
 	if err != nil {
 		return err
 	}
-	runRecord, err := engine.LoadRunForResume(store, runID, identity)
+	runRecord, err := engine.LoadRunForResume(inputs.store, runID, inputs.identity)
 	if err != nil {
 		return err
 	}
-	runRecord.Meta.GitHubPostingSuppressed = suppressedGitHubPostingReason(runRecord.Meta.GitHubPostingSuppressed, repo.DirtyWorktree, opts.noGitHub, cfg.GitHub.Enabled)
+	runRecord.Meta.GitHubPostingSuppressed = suppressedGitHubPostingReason(runRecord.Meta.GitHubPostingSuppressed, inputs.repository.DirtyWorktree, opts.noGitHub, inputs.configuration.GitHub.Enabled)
+	runRecord.Meta.MaxParallel = getMaxParallel(inputs.configuration, opts)
 
-	return c.executeAndReport(commandContext, forceStop, repo, cfg, store, runRecord, opts.noGitHub)
+	return c.executeAndReport(commandContext, forceStop, inputs, runRecord, opts)
 }
 
 func (c *cli) publishCommand(commandContext context.Context, args []string) error {
@@ -338,20 +366,20 @@ func (c *cli) publishCommand(commandContext context.Context, args []string) erro
 	if err != nil {
 		return err
 	}
-	repo, _, _, _, identity, _, err := prepareContext(commandContext, repoRoot, run.Meta.ConfigPath)
+	inputs, err := loadPlanInputs(commandContext, repoRoot, run.Meta.ConfigPath)
 	if err != nil {
 		return err
 	}
-	if err := validatePublishableRun(repo, identity, run); err != nil {
+	if err := validatePublishableRun(inputs.repository, inputs.identity, run); err != nil {
 		return err
 	}
 	if err := engine.PublishCompletedRun(commandContext, store, run, engine.PublishOptions{
 		Reporter:  ghstatus.CLIReporter{Token: os.Getenv(ghstatus.TokenEnvVar)},
-		TargetSHA: repo.HeadSHA,
+		TargetSHA: inputs.repository.HeadSHA,
 	}); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(c.stdout, "published run %s to %s @ %s\n", run.RunID, repo.RepoSlug, repo.HeadSHA)
+	_, _ = fmt.Fprintf(c.stdout, "published run %s to %s @ %s\n", run.RunID, inputs.repository.RepoSlug, inputs.repository.HeadSHA)
 	return nil
 }
 
@@ -444,24 +472,7 @@ func (c *cli) showCommand(commandContext context.Context, args []string) error {
 	status := displayRunStatus(run.Summary.Status, run.StepStatuses)
 
 	if opts.json {
-		payload := showJSON{
-			RunID:          run.RunID,
-			RunDir:         run.RunDir,
-			Status:         status,
-			RunnerAlive:    getRunnerAlive(run.Meta),
-			Meta:           run.Meta,
-			Summary:        run.Summary,
-			Steps:          run.StepStatuses,
-			RunnerLogPath:  runnerLogPath,
-			PlannerLogPath: plannerLogPath,
-		}
-		if len(eventItems) > 0 {
-			payload.LatestEvent = &eventItems[len(eventItems)-1]
-		}
-		if eventErr != nil {
-			payload.LatestEventError = eventErr.Error()
-		}
-		return writeJSON(c.stdout, payload)
+		return writeJSON(c.stdout, buildShowJSON(run, store, eventItems, eventErr))
 	}
 
 	_, _ = fmt.Fprintf(c.stdout, "run: %s\n", run.RunID)
@@ -469,6 +480,7 @@ func (c *cli) showCommand(commandContext context.Context, args []string) error {
 	_, _ = fmt.Fprintf(c.stdout, "repo: %s @ %s\n", run.Meta.RepoSlug, run.Meta.HeadSHA)
 	_, _ = fmt.Fprintf(c.stdout, "publication events: local-ci logs %s --runner --json\n", run.RunID)
 	_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", run.RunDir)
+	_, _ = fmt.Fprintf(c.stdout, "max_parallel: %d\n", max(1, run.Meta.MaxParallel))
 	_, _ = fmt.Fprintf(c.stdout, "started: %s\n", formatTime(run.Meta.StartedAt))
 	if pid := displayRunnerPID(run.Meta); pid != nil {
 		_, _ = fmt.Fprintf(c.stdout, "pid: %d", *pid)
@@ -528,6 +540,12 @@ func (c *cli) showCommand(commandContext context.Context, args []string) error {
 			_, _ = fmt.Fprintf(c.stdout, " duration=%s", time.Duration(statusItem.DurationMillis)*time.Millisecond)
 		} else if statusItem.State == string(engine.StepStateRunning) && statusItem.StartedAt != nil {
 			_, _ = fmt.Fprintf(c.stdout, " started=%s", statusItem.StartedAt.Format(time.RFC3339))
+		}
+		if statusItem.Timeout != "" {
+			_, _ = fmt.Fprintf(c.stdout, " timeout=%s", statusItem.Timeout)
+		}
+		if statusItem.Message != "" {
+			_, _ = fmt.Fprintf(c.stdout, " message=%q", statusItem.Message)
 		}
 		_, _ = fmt.Fprintln(c.stdout)
 	}
@@ -684,7 +702,7 @@ func loadRunBestEffort(store persistence.Store, runID string) (engine.RunRecord,
 		stepStatuses = append(stepStatuses, status)
 	}
 
-	summary := buildInspectSummary(runID, stepStatuses, meta.StartedAt, meta.FinishedAt)
+	summary := engine.BuildRunSummary(meta, stepStatuses)
 	if storedSummary, readErr := persistence.ReadJSONFile[persistence.Summary](store.RunFile(runID, persistence.SummaryFile)); readErr == nil {
 		summary.Metadata = cloneStringMap(storedSummary.Metadata)
 	}
@@ -697,60 +715,6 @@ func loadRunBestEffort(store persistence.Store, runID string) (engine.RunRecord,
 		Summary:      summary,
 		StepStatuses: stepStatuses,
 	}, nil
-}
-
-// buildInspectSummary mirrors the engine's summary rules so JSON and plain-text
-// inspection still reflect the same underlying persisted facts.
-func buildInspectSummary(runID string, statuses []persistence.StepStatus, startedAt *time.Time, finishedAt *time.Time) persistence.Summary {
-	stepSummaries := make([]persistence.StepSummary, 0, len(statuses))
-	counts := make(map[string]int)
-	for _, status := range statuses {
-		counts[status.State]++
-		stepSummaries = append(stepSummaries, persistence.StepSummary{
-			StepID:        status.StepID,
-			State:         status.State,
-			GitHubContext: status.GitHubContext,
-		})
-	}
-
-	runStatus := summarizeInspectRunStatus(counts)
-	if finishedAt != nil && counts[string(engine.StepStateInterrupted)] > 0 {
-		runStatus = string(engine.StepStateInterrupted)
-	}
-
-	summary := persistence.Summary{
-		RunID:      runID,
-		Status:     runStatus,
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
-		Steps:      stepSummaries,
-		Counts:     counts,
-	}
-	if startedAt != nil && finishedAt != nil {
-		summary.DurationMillis = finishedAt.Sub(*startedAt).Milliseconds()
-	}
-	return summary
-}
-
-func summarizeInspectRunStatus(counts map[string]int) string {
-	switch {
-	case len(counts) == 0:
-		return string(engine.StepStateSuccess)
-	case counts[string(engine.StepStatePending)] > 0 || counts[string(engine.StepStateRunning)] > 0 || counts[string(engine.StepStateInterrupted)] > 0:
-		return string(engine.StepStatePending)
-	case counts[string(engine.StepStateFailure)] > 0:
-		return string(engine.StepStateFailure)
-	case counts[string(engine.StepStateBlocked)] > 0:
-		return string(engine.StepStateBlocked)
-	case counts[string(engine.StepStateStale)] > 0:
-		return string(engine.StepStateStale)
-	case counts[string(engine.StepStateSuccess)] > 0:
-		return string(engine.StepStateSuccess)
-	case counts[string(engine.StepStateSkipped)] > 0:
-		return string(engine.StepStateSkipped)
-	default:
-		return string(engine.StepStateSuccess)
-	}
 }
 
 func cloneStringMap(src map[string]string) map[string]string {
@@ -811,7 +775,7 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 		return fmt.Errorf("publish refused: GitHub posting was disabled for this run")
 	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
-		return fmt.Errorf("publish refused: run %s already posted to GitHub", run.RunID)
+		return fmt.Errorf("publish refused: run %s was configured to post during execution; publish requires a suppressed run (inspect receipts; configuration is not proof of publication)", run.RunID)
 	}
 	if repo.DirtyWorktree {
 		return fmt.Errorf("publish refused: current worktree is dirty")
@@ -836,75 +800,97 @@ func (c *cli) readOnlyStore(commandContext context.Context) (persistence.Store, 
 	return persistence.NewStore(repoRoot), nil
 }
 
-func prepareContext(
-	ctx context.Context,
-	startDir string,
-	configPath string,
-) (gitrepo.Info, config.File, config.ResolvedPlan, string, engine.RunIdentity, persistence.Store, error) {
-	repo, err := gitrepo.Discover(ctx, startDir)
+func loadPlanInputs(ctx context.Context, startDirectory string, configPath string) (planInputs, error) {
+	repository, err := gitrepo.Discover(ctx, startDirectory)
 	if err != nil {
-		return gitrepo.Info{}, config.File{}, config.ResolvedPlan{}, "", engine.RunIdentity{}, persistence.Store{}, err
+		return planInputs{}, err
 	}
-	resolvedConfigPath := resolveConfigPath(repo.Root, configPath)
-	cfg, err := config.Load(resolvedConfigPath)
+	configFilePath := resolveConfigPath(repository.Root, configPath)
+	configHashBeforePlanning, err := engine.HashFile(configFilePath)
 	if err != nil {
-		return gitrepo.Info{}, config.File{}, config.ResolvedPlan{}, "", engine.RunIdentity{}, persistence.Store{}, err
+		return planInputs{}, err
 	}
-
-	var (
-		plan       config.ResolvedPlan
-		plannerLog string
-	)
-	if cfg.Planner != nil {
-		result, plannerErr := planner.Execute(ctx, repo.Root, repo.RepoSlug, repo.HeadSHA, resolvedConfigPath, *cfg.Planner)
-		if plannerErr != nil {
-			return gitrepo.Info{}, config.File{}, config.ResolvedPlan{}, "", engine.RunIdentity{}, persistence.Store{}, plannerErr
-		}
-		plan = result.Plan
-		plannerLog = result.Log
+	configuration, err := config.Load(configFilePath)
+	if err != nil {
+		return planInputs{}, err
+	}
+	inputs := planInputs{
+		repository:    repository,
+		configuration: configuration,
+		store:         persistence.NewStore(repository.Root),
+	}
+	if configuration.Planner == nil {
+		inputs.plan = configuration.StaticPlan()
 	} else {
-		plan = cfg.StaticPlan()
+		planned, err := planner.Execute(ctx, repository.Root, repository.RepoSlug, repository.HeadSHA, configFilePath, *configuration.Planner)
+		if err != nil {
+			return planInputs{}, err
+		}
+		inputs.plan, inputs.plannerLog = planned.Plan, planned.Log
+
+		// Ignored outputs are allowed, but checks must use the captured source.
+		repositoryAfterPlanning, err := gitrepo.Discover(ctx, repository.Root)
+		if err != nil {
+			return planInputs{}, err
+		}
+		repositoryChanged := repositoryAfterPlanning.Root != repository.Root || repositoryAfterPlanning.RepoSlug != repository.RepoSlug
+		headChanged := repositoryAfterPlanning.HeadSHA != repository.HeadSHA
+		sourceChanged := repositoryAfterPlanning.WorktreeTreeHash != repository.WorktreeTreeHash
+		if repositoryChanged || headChanged || sourceChanged {
+			return planInputs{}, fmt.Errorf("planner changed repository identity, HEAD, or worktree snapshot; write generated files to Git-ignored paths and retry")
+		}
 	}
 
-	identity, err := engine.BuildRunIdentity(repo.Root, repo.RepoSlug, repo.HeadSHA, resolvedConfigPath, plan)
+	identity, err := engine.BuildRunIdentity(repository.Root, repository.RepoSlug, repository.HeadSHA, configFilePath, inputs.plan)
 	if err != nil {
-		return gitrepo.Info{}, config.File{}, config.ResolvedPlan{}, "", engine.RunIdentity{}, persistence.Store{}, err
+		return planInputs{}, err
 	}
-	identity.WorktreeTreeHash = repo.WorktreeTreeHash
-	store := persistence.NewStore(repo.Root)
-	return repo, cfg, plan, plannerLog, identity, store, nil
+	if identity.ConfigHash != configHashBeforePlanning {
+		return planInputs{}, fmt.Errorf("configuration changed while preparing the plan; retry with stable inputs")
+	}
+	identity.WorktreeTreeHash = repository.WorktreeTreeHash
+	inputs.identity = identity
+	return inputs, nil
 }
 
 func (c *cli) executeAndReport(
 	commandContext context.Context,
 	forceStop <-chan struct{},
-	repo gitrepo.Info,
-	cfg config.File,
-	store persistence.Store,
+	inputs planInputs,
 	runRecord engine.RunRecord,
-	noGitHub bool,
+	opts executionCLIOptions,
 ) error {
-	executed, err := engine.ExecuteRun(commandContext, store, runRecord, engine.ExecuteOptions{
+	executionOptions := engine.ExecuteOptions{
 		ForceStop: forceStop,
-		Reporter:  newReporter(cfg, noGitHub),
-		Stdout:    c.stdout,
-		Stderr:    c.stderr,
+		Reporter:  newReporter(inputs.configuration, opts.noGitHub),
 		Progress:  newProgressWriter(c.stderr, c.errStyles),
-	})
+		FromStep:  opts.fromStep,
+	}
+	if !opts.json {
+		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
+	}
+	executed, err := engine.ExecuteRun(commandContext, inputs.store, runRecord, executionOptions)
 	if err != nil {
 		return err
 	}
 
-	_, _ = fmt.Fprintf(c.stdout, "run %s: %s\n", executed.RunID, c.outStyles.status(executed.Summary.Status, executed.Summary.Status))
-	_, _ = fmt.Fprintf(c.stdout, "repo: %s @ %s\n", repo.RepoSlug, repo.HeadSHA)
-	_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", executed.RunDir)
-	switch executed.Meta.GitHubPostingSuppressed {
-	case "dirty_worktree":
-		_, _ = fmt.Fprintln(c.stdout, "github: skipped for dirty worktree; commit the same snapshot and use local-ci publish <run-id>")
-	case "cli_disabled":
-		_, _ = fmt.Fprintln(c.stdout, "github: disabled by --no-github; use local-ci publish <run-id> if you want to post this result later")
-	case persistence.GitHubPostingSuppressionPostFailed:
-		_, _ = fmt.Fprintf(c.stdout, "github: posting failed; fix auth or network, then use local-ci publish %s\n", executed.RunID)
+	if opts.json {
+		items, eventError := events.ReadFile(inputs.store.RunFile(executed.RunID, persistence.EventsFile))
+		if err := writeJSON(c.stdout, buildShowJSON(executed, inputs.store, items, eventError)); err != nil {
+			return err
+		}
+	} else {
+		_, _ = fmt.Fprintf(c.stdout, "run %s: %s\n", executed.RunID, c.outStyles.status(executed.Summary.Status, executed.Summary.Status))
+		_, _ = fmt.Fprintf(c.stdout, "repo: %s @ %s\n", inputs.repository.RepoSlug, inputs.repository.HeadSHA)
+		_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", executed.RunDir)
+		switch executed.Meta.GitHubPostingSuppressed {
+		case "dirty_worktree":
+			_, _ = fmt.Fprintln(c.stdout, "github: skipped for dirty worktree; commit the same snapshot and use local-ci publish <run-id>")
+		case "cli_disabled":
+			_, _ = fmt.Fprintln(c.stdout, "github: disabled by --no-github; use local-ci publish <run-id> if you want to post this result later")
+		case persistence.GitHubPostingSuppressionPostFailed:
+			_, _ = fmt.Fprintf(c.stdout, "github: posting failed; fix auth or network, then use local-ci publish %s\n", executed.RunID)
+		}
 	}
 
 	if executed.Summary.Status == string(engine.StepStateInterrupted) {
@@ -965,6 +951,35 @@ func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOption
 			opts.configPath = args[index]
 		case arg == "--no-github":
 			opts.noGitHub = true
+		case arg == "--json":
+			opts.json = true
+		case arg == "--max-parallel" || strings.HasPrefix(arg, "--max-parallel="):
+			value := strings.TrimPrefix(arg, "--max-parallel=")
+			if arg == "--max-parallel" {
+				index++
+				if index >= len(args) {
+					return executionCLIOptions{}, fmt.Errorf("--max-parallel requires a positive integer")
+				}
+				value = args[index]
+			}
+			count, err := strconv.Atoi(value)
+			if err != nil || count <= 0 {
+				return executionCLIOptions{}, fmt.Errorf("--max-parallel requires a positive integer")
+			}
+			opts.maxParallel = count
+		case arg == "--from-step" || strings.HasPrefix(arg, "--from-step="):
+			value := strings.TrimPrefix(arg, "--from-step=")
+			if arg == "--from-step" {
+				index++
+				if index >= len(args) {
+					return executionCLIOptions{}, fmt.Errorf("--from-step requires a step id")
+				}
+				value = args[index]
+			}
+			if err := requireFlagValue("--from-step", value); err != nil {
+				return executionCLIOptions{}, err
+			}
+			opts.fromStep = value
 		case strings.HasPrefix(arg, "-"):
 			return executionCLIOptions{}, fmt.Errorf("unknown flag %q", arg)
 		default:
@@ -1145,9 +1160,9 @@ func collectExecutionPositionals(args []string) []string {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		switch {
-		case arg == "--config":
+		case arg == "--config" || arg == "--max-parallel" || arg == "--from-step":
 			index++
-		case strings.HasPrefix(arg, "--config="):
+		case strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--max-parallel=") || strings.HasPrefix(arg, "--from-step="):
 		case arg == "--no-github":
 		case strings.HasPrefix(arg, "-"):
 		default:
@@ -1522,6 +1537,7 @@ Artifacts live inside the current git repo:
   .local-ci/runs/<run-id>/
 
 Main commands:
+  local-ci plan                Explain config, snapshot, dependencies, and worker limit; executes the planner only.
   local-ci run                 Start a new run and stream progress.
   local-ci resume <run-id>     Resume a prior run with the same immutable run id.
   local-ci runs                List recent runs from disk, newest first.
@@ -1540,6 +1556,7 @@ Read-only debugging flow:
   local-ci logs <run-id> --step <step-id>
 
 Side effects:
+  plan executes the repo-owned planner, but not verification steps; creates no run and posts no statuses.
   run/resume execute repo-owned code and may post GitHub statuses.
   publish may execute the planner and posts statuses; it is NOT a dry run.
   These commands require separate authorization. No command pushes commits or deploys by itself.
@@ -1595,13 +1612,15 @@ Notes:
 func (c *cli) printRunHelp() {
 	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
-  local-ci run [--config <path>] [--no-github]
+  local-ci run [--config <path>] [--no-github] [--max-parallel <count>] [--json]
 
 Start a new local CI run, stream progress live, and persist artifacts under .local-ci/runs/<run-id>/.
 
 Flags:
-  --config <path>   Config file path. Default: .local-ci.toml
-  --no-github       Disable GitHub status posting for this execution
+  --config <path>         Config file path. Default: .local-ci.toml
+  --no-github             Disable GitHub status posting for this execution
+  --max-parallel <count>  Positive worker limit. Default: config max_parallel, otherwise 1
+  --json                  One final snapshot on stdout, same schema as show --json; progress on stderr
 
 Examples:
   local-ci run
@@ -1609,10 +1628,17 @@ Examples:
   local-ci run --no-github
 
 Notes:
-  - Child stdout/stderr stream live.
+  - At max_parallel=1, child stdout/stderr stream live unless --json is used.
+  - With parallel execution, raw output stays in isolated step logs to avoid mixed transcripts.
+  - --json keeps child output in logs and emits a final snapshot even for failed/interrupted runs.
+  - Independent steps continue after check failures; failed dependencies block dependents, skipped dependencies satisfy needs.
+  - Step timeout (e.g. timeout = "10m") is a failure, not operator interruption.
+  - Use local-ci plan --json to inspect the complete plan before running it.
+  - No partial-plan run is supported; --max-parallel 1 changes scheduling, not coverage.
   - Runner progress lines are separate from persisted step logs.
   - On step failure or interruption the CLI prints the exact combined log path immediately.
-  - SIGINT or SIGTERM stops the active step, including its process group on macOS and Linux, and finishes the run as interrupted.
+  - SIGINT or SIGTERM stops all active process groups on macOS/Linux, stops new launches, and finishes the run as interrupted.
+  - Final reporting shares one five-second shutdown budget; artifacts are finalized by one scheduler writer.
   - A GitHub posting failure is recorded and does not stop local steps; use local-ci publish <run-id> after fixing it.
   - Use --no-github to keep the run local-only, then local-ci publish <run-id> later if needed.
 `)
@@ -1621,13 +1647,16 @@ Notes:
 func (c *cli) printResumeHelp() {
 	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
-  local-ci resume <run-id> [--config <path>] [--no-github]
+  local-ci resume <run-id> [--config <path>] [--no-github] [--max-parallel <count>] [--from-step <id>] [--json]
 
 Resume a prior run using the same immutable run id.
 
 Flags:
-  --config <path>   Config file path. Default: .local-ci.toml
-  --no-github       Disable GitHub status posting for this execution
+  --config <path>         Config file path. Default: .local-ci.toml
+  --no-github             Disable GitHub status posting for this execution
+  --max-parallel <count>  Positive worker limit. Default: config max_parallel, otherwise 1
+  --from-step <id>        Rerun this step and every dependent; reuse unrelated successes
+  --json                  One final snapshot on stdout, same schema as show --json; progress on stderr
 
 Examples:
   local-ci resume 20260627T150405Z-deadbeef
@@ -1637,7 +1666,11 @@ Examples:
 Notes:
   - Resume reuses prior successful steps only when repo identity, HEAD SHA, config hash, and plan hash still match.
   - Resume fails closed when the stored run identity no longer matches the current checkout.
-  - Interrupted steps are rerun; prior successful steps are reused.
+  - Interrupted steps are rerun; prior successful steps are reused and reported as reuse progress lines.
+  - --from-step records stale events and reruns dependents, not a partial verification plan.
+  - --max-parallel 1 is a serial debugging fallback; it does not change the plan or bypass identity checks.
+  - Shared GitHub contexts pass only when every step using that context passed or was skipped.
+  - Parallel/JSON output stays in isolated step logs; inspect show/logs from another shell.
   - A GitHub posting failure is recorded and does not stop local steps; use local-ci publish <run-id> after fixing it.
   - Use --no-github to keep the resumed execution local-only.
 `)
@@ -1681,6 +1714,9 @@ Examples:
 
 Notes:
   - Works for both active and finished runs.
+  - Elapsed time is current time minus started_at; duration_millis describes completed work.
+  - Run started_at survives resume; use the latest run.started event for current-attempt elapsed time.
+  - No built-in ETA or internal test progress percentage is provided; inspect step logs.
   - Reads meta.json, summary.json, events.jsonl, and per-step status.json from disk only.
   - Shows the stored runner PID for active runs when known and flags a dead recorded PID.
   - Shows the stored tree snapshot and dirty-file manifest for the run.

@@ -15,6 +15,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/engine"
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
+	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
 
 func TestBuiltBinaryDocumentsReceiptsWithoutSourceOrGit(t *testing.T) {
@@ -24,7 +25,7 @@ func TestBuiltBinaryDocumentsReceiptsWithoutSourceOrGit(t *testing.T) {
 		t.Fatalf("build: %v\n%s", err, output)
 	}
 	outsideRepo := t.TempDir()
-	for _, args := range [][]string{{"--help"}, {"manual"}, {"help", "all"}, {"help", "show"}, {"publish", "--help"}, {"version"}} {
+	for _, args := range [][]string{{"--help"}, {"manual"}, {"help", "all"}, {"help", "show"}, {"help", "plan"}, {"run", "--help"}, {"resume", "--help"}, {"publish", "--help"}, {"version"}} {
 		command := exec.Command(binary, args...)
 		command.Dir = outsideRepo
 		command.Env = []string{"PATH=/no-external-programs", "HOME=" + outsideRepo}
@@ -42,6 +43,20 @@ func TestBuiltBinaryDocumentsReceiptsWithoutSourceOrGit(t *testing.T) {
 		for _, text := range []string{fmt.Sprintf("github_post.version = %d", events.PublicationVersion), "github.status.requested", "github.status.posted", "github.status.failed", "unknown", "NOT a dry", "--runner --json"} {
 			if !strings.Contains(manual, text) {
 				t.Fatalf("binary manual missing %q", text)
+			}
+		}
+		// Persisted field names are checked by reflection below; these are the operator-facing names.
+		for _, text := range []string{"--max-parallel", "--from-step", "local-ci plan", "run --json"} {
+			if !strings.Contains(manual, text) {
+				t.Fatalf("binary manual missing execution contract %q", text)
+			}
+		}
+		for _, contract := range []reflect.Type{reflect.TypeFor[persistence.Meta](), reflect.TypeFor[persistence.StepStatus]()} {
+			for index := 0; index < contract.NumField(); index++ {
+				name := strings.Split(contract.Field(index).Tag.Get("json"), ",")[0]
+				if !strings.Contains(manual, "`"+name+"`") {
+					t.Fatalf("undocumented persisted execution field %s", name)
+				}
 			}
 		}
 		contract := reflect.TypeFor[events.GitHubPost]()
