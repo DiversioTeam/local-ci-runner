@@ -1,11 +1,9 @@
 package events
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -94,20 +92,11 @@ func nextSequence(path string) (int64, error) {
 			return 0, fmt.Errorf("event log has an incomplete trailing line; refusing to append")
 		}
 	}
-	if _, err := ReadFile(path); err != nil {
+	// ReadFile has no line-length limit and refuses corrupt lines, so the events it
+	// returns are the persisted history the next sequence number must follow.
+	items, err := ReadFile(path)
+	if err != nil {
 		return 0, err
 	}
-	var count int64
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if strings.TrimSpace(scanner.Text()) == "" {
-			continue
-		}
-		count++
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("scan %s: %w", path, err)
-	}
-
-	return count + 1, nil
+	return int64(len(items)) + 1, nil
 }

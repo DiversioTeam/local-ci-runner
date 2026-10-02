@@ -1,6 +1,7 @@
 package gitrepo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -139,7 +140,8 @@ func repoRemoteName(ctx context.Context, repoRoot string) (string, error) {
 	branch, err := gitOutput(ctx, repoRoot, "branch", "--show-current")
 	if err == nil && branch != "" {
 		remoteName, remoteErr := gitOutput(ctx, repoRoot, "config", "--get", "branch."+branch+".remote")
-		if remoteErr == nil && remoteName != "" {
+		// "." means the branch tracks another local branch, so it names no remote repository.
+		if remoteErr == nil && remoteName != "" && remoteName != "." {
 			return remoteName, nil
 		}
 	}
@@ -185,6 +187,32 @@ func gitOutputWithEnv(ctx context.Context, dir string, env []string, args ...str
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+// gitPaths runs a git listing with -z and returns its NUL-separated fields untouched.
+// Line output quotes unusual names (non-ASCII, tabs) and trimming drops edge spaces,
+// so paths parsed from it may name no file at all.
+func gitPaths(ctx context.Context, dir string, env []string, args ...string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.WaitDelay = time.Second
+	if env != nil {
+		cmd.Env = env
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("git %s: %w", strings.Join(args, " "), context.Cause(ctx))
+		}
+		return nil, fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
+	}
+	fields := strings.Split(string(output), "\x00")
+	if len(fields) > 0 && fields[len(fields)-1] == "" {
+		fields = fields[:len(fields)-1]
+	}
+	return fields, nil
 }
 
 type worktreeSnapshotResult struct {
@@ -241,32 +269,29 @@ func worktreeSnapshot(ctx context.Context, repoRoot string) (worktreeSnapshotRes
 }
 
 func diffWorktreeFiles(ctx context.Context, repoRoot string, env []string) ([]WorktreeFile, error) {
-	output, err := gitOutputWithEnv(ctx, repoRoot, env, "diff-index", "--cached", "--name-status", "-M", "HEAD", "--")
+	// With -z each entry is a status field followed by one path, or two for renames and copies.
+	fields, err := gitPaths(ctx, repoRoot, env, "diff-index", "-z", "--cached", "--name-status", "-M", "HEAD", "--")
 	if err != nil {
 		return nil, err
 	}
-	lines := nonEmptyLines(output)
-	files := make([]WorktreeFile, 0, len(lines))
-	for _, line := range lines {
-		parts := strings.Split(line, "\t")
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("parse git diff-index line %q", line)
-		}
-		status, err := worktreeFileStatus(parts[0])
+	files := make([]WorktreeFile, 0, len(fields)/2)
+	for index := 0; index < len(fields); {
+		status, err := worktreeFileStatus(fields[index])
 		if err != nil {
 			return nil, err
 		}
-		item := WorktreeFile{Status: status}
-		switch status {
-		case WorktreeFileRenamed, WorktreeFileCopied:
-			if len(parts) < 3 {
-				return nil, fmt.Errorf("parse git diff-index rename/copy line %q", line)
-			}
-			item.PreviousPath = parts[1]
-			item.Path = parts[2]
-		default:
-			item.Path = parts[1]
+		pathCount := 1
+		if status == WorktreeFileRenamed || status == WorktreeFileCopied {
+			pathCount = 2
 		}
+		if index+pathCount >= len(fields) {
+			return nil, fmt.Errorf("parse git diff-index: status %q is missing its path", fields[index])
+		}
+		item := WorktreeFile{Status: status, Path: fields[index+pathCount]}
+		if pathCount == 2 {
+			item.PreviousPath = fields[index+1]
+		}
+		index += pathCount + 1
 		if item.Status != WorktreeFileDeleted && item.Status != WorktreeFileUnmerged {
 			blobHash, blobErr := indexedBlobHash(ctx, repoRoot, env, item.Path)
 			if blobErr != nil {
@@ -304,23 +329,27 @@ func worktreeFileStatus(token string) (WorktreeFileStatus, error) {
 }
 
 func indexedBlobHash(ctx context.Context, repoRoot string, env []string, path string) (string, error) {
-	output, err := gitOutputWithEnv(ctx, repoRoot, env, "ls-files", "-s", "--", path)
+	// Each -z entry is "<mode> <object> <stage>\t<path>".
+	entries, err := gitPaths(ctx, repoRoot, env, "ls-files", "-z", "-s", "--", path)
 	if err != nil {
 		return "", err
 	}
-	fields := strings.Fields(output)
+	if len(entries) == 0 {
+		return "", fmt.Errorf("git ls-files found no index entry for %q", path)
+	}
+	metadata, _, _ := strings.Cut(entries[0], "\t")
+	fields := strings.Fields(metadata)
 	if len(fields) < 2 {
-		return "", fmt.Errorf("parse git ls-files output for %q: %q", path, output)
+		return "", fmt.Errorf("parse git ls-files entry for %q: %q", path, entries[0])
 	}
 	return fields[1], nil
 }
 
 func listUntrackedFiles(ctx context.Context, repoRoot string) ([]string, error) {
-	output, err := gitOutput(ctx, repoRoot, "ls-files", "--others", "--exclude-standard")
+	paths, err := gitPaths(ctx, repoRoot, nil, "ls-files", "-z", "--others", "--exclude-standard")
 	if err != nil {
 		return nil, err
 	}
-	paths := nonEmptyLines(output)
 	result := make([]string, 0, len(paths))
 	for _, path := range paths {
 		if path == ".local-ci" || strings.HasPrefix(path, ".local-ci/") {
