@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
-	"time"
 )
 
 func TestIsNewerVersion(t *testing.T) {
@@ -38,23 +38,17 @@ func TestIsNewerVersion(t *testing.T) {
 func TestCheckerNoticeUsesCache(t *testing.T) {
 	t.Parallel()
 
-	serverHits := 0
+	var serverHits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		serverHits++
+		serverHits.Add(1)
 		_, _ = writer.Write([]byte(`{"tag_name":"v0.2.0","html_url":"https://example.com/release"}`))
 	}))
 	defer server.Close()
 
-	cachePath := filepath.Join(t.TempDir(), "update.json")
-	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
 	checker := Checker{
 		CurrentVersion:   "v0.1.0",
 		LatestReleaseURL: server.URL,
-		CachePath:        cachePath,
-		CacheTTL:         time.Hour,
-		HTTPClient:       server.Client(),
-		Now:              func() time.Time { return now },
-		ExecutablePath:   "/home/dev/.local/bin/local-ci",
+		CachePath:        filepath.Join(t.TempDir(), "update.json"),
 	}
 
 	message, err := checker.Notice(context.Background())
@@ -74,7 +68,7 @@ func TestCheckerNoticeUsesCache(t *testing.T) {
 	if message == "" {
 		t.Fatal("expected cached update message")
 	}
-	if got, want := serverHits, 1; got != want {
+	if got, want := serverHits.Load(), int32(1); got != want {
 		t.Fatalf("server hits = %d, want %d", got, want)
 	}
 }
@@ -89,7 +83,7 @@ func TestIsHomebrewPath(t *testing.T) {
 	}{
 		{name: "macos arm cellar", path: "/opt/homebrew/Cellar/local-ci/0.2.0/bin/local-ci", want: true},
 		{name: "macos intel cellar", path: "/usr/local/Cellar/local-ci/0.2.0/bin/local-ci", want: true},
-		{name: "linuxbrew", path: "/home/linuxbrew/.linuxbrew/Cellar/local-ci/0.2.0/bin/local-ci", want: true},
+		{name: "linuxbrew prefix", path: "/home/linuxbrew/.linuxbrew/bin/local-ci", want: true},
 		{name: "install script default", path: "/home/dev/.local/bin/local-ci", want: false},
 		{name: "install script system wide", path: "/usr/local/bin/local-ci", want: false},
 		{name: "go install", path: "/home/dev/go/bin/local-ci", want: false},

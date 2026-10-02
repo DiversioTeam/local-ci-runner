@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
@@ -13,7 +12,6 @@ import (
 
 // PublishOptions configures publication of a stored run.
 type PublishOptions struct {
-	Now       func() time.Time
 	Reporter  ghstatus.Reporter
 	TargetSHA string
 }
@@ -57,8 +55,6 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 		return err
 	}
 	appender.PublicationSource = events.PublicationPublish
-	now := resolveNow(opts.Now)
-	at := now()
 
 	postedContexts := make(map[string]struct{})
 	for _, status := range run.StepStatuses {
@@ -66,7 +62,7 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 			continue
 		}
 		contextStatus := getContextStepStatus(run.StepStatuses, status)
-		if err := postStepTerminalStatus(ctx, opts.Reporter, &appender, meta, contextStatus, at); err != nil {
+		if err := postStepTerminalStatus(ctx, opts.Reporter, &appender, meta, contextStatus); err != nil {
 			return err
 		}
 		postedContexts[status.GitHubContext] = struct{}{}
@@ -74,5 +70,5 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 	// Publication deliberately leaves run metadata untouched: the run is the
 	// evidence of what was verified, and repeat publications are recorded as
 	// further attempts in the event log rather than by rewriting that evidence.
-	return postAggregateStatus(ctx, opts.Reporter, &appender, meta, aggregateGitHubState(run.Summary.Status), at)
+	return postAggregateStatus(ctx, opts.Reporter, &appender, meta, aggregateGitHubState(run.Summary.Status))
 }

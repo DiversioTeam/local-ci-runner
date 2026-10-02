@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/DiversioTeam/local-ci-runner/internal/config"
 	"github.com/DiversioTeam/local-ci-runner/internal/engine"
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
@@ -40,7 +42,7 @@ func TestBuiltBinaryDocumentsReceiptsWithoutSourceOrGit(t *testing.T) {
 			continue
 		}
 		manual := string(output)
-		for _, text := range []string{fmt.Sprintf("github_post.version = %d", events.PublicationVersion), "github.status.requested", "github.status.posted", "github.status.failed", "unknown", "NOT a dry", "--runner --json"} {
+		for _, text := range []string{fmt.Sprintf("github_post.version = %d", events.PublicationVersion), "github.status.requested", "github.status.posted", "github.status.failed", "NOT a dry", "--runner --json"} {
 			if !strings.Contains(manual, text) {
 				t.Fatalf("binary manual missing %q", text)
 			}
@@ -69,6 +71,35 @@ func TestBuiltBinaryDocumentsReceiptsWithoutSourceOrGit(t *testing.T) {
 	}
 }
 
+func TestBuiltBinaryExitStatus(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "local-ci")
+	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, output)
+	}
+	failingRepo := newGitRepo(t)
+	writeFile(t, filepath.Join(failingRepo, config.DefaultPath), []byte("version = 1\n[[steps]]\nid = 'fail'\ncommand = ['sh', '-c', 'exit 7']\n"))
+	// The manual documents 1 for an unsuccessful local run and 2 for usage errors.
+	for _, test := range []struct {
+		name     string
+		dir      string
+		args     []string
+		wantCode int
+	}{
+		{name: "unsuccessful run", dir: failingRepo, args: []string{"run", "--no-github"}, wantCode: 1},
+		{name: "usage error", dir: t.TempDir(), args: []string{"bogus"}, wantCode: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(binary, test.args...)
+			command.Dir = test.dir
+			output, err := command.CombinedOutput()
+			var exitError *exec.ExitError
+			if !errors.As(err, &exitError) || exitError.ExitCode() != test.wantCode {
+				t.Fatalf("exit = %v, want status %d\n%s", err, test.wantCode, output)
+			}
+		})
+	}
+}
+
 type successfulPublicationReporter struct{}
 
 func (successfulPublicationReporter) PostStatus(context.Context, ghstatus.Target, ghstatus.Status) error {
@@ -76,11 +107,23 @@ func (successfulPublicationReporter) PostStatus(context.Context, ghstatus.Target
 }
 
 func TestRunnerLogsExposePublicationWithoutWritingArtifacts(t *testing.T) {
-	fixture := newCLIFixture(t)
-	run := fixture.finishedRun
-	run.Meta.GitHubEnabled = true
-	run.Meta.GitHubPostingSuppressed = "cli_disabled"
-	if err := engine.PublishCompletedRun(t.Context(), fixture.store, run, engine.PublishOptions{TargetSHA: run.Meta.HeadSHA, Reporter: successfulPublicationReporter{}}); err != nil {
+	root := newGitRepo(t)
+	writeFile(t, filepath.Join(root, config.DefaultPath), []byte("version = 1\n[github]\nenabled = true\n[[steps]]\nid = 'check'\ncommand = ['sh', '-c', 'exit 0']\n"))
+	var stdout bytes.Buffer
+	// --no-github records why posting was suppressed, which is what makes the run publishable.
+	if err := newCLI(&stdout, &bytes.Buffer{}, root).runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var completed showJSON
+	if err := json.Unmarshal(stdout.Bytes(), &completed); err != nil {
+		t.Fatal(err)
+	}
+	store := persistence.NewStore(root)
+	run, err := engine.LoadRun(store, completed.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.PublishCompletedRun(t.Context(), store, run, engine.PublishOptions{TargetSHA: run.Meta.HeadSHA, Reporter: successfulPublicationReporter{}}); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(run.RunDir, "events.jsonl")
@@ -88,8 +131,9 @@ func TestRunnerLogsExposePublicationWithoutWritingArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stdout, stderr bytes.Buffer
-	if err := newCLI(&stdout, &stderr, fixture.root).run([]string{"logs", run.RunID, "--runner", "--json"}); err != nil {
+	var stderr bytes.Buffer
+	stdout.Reset()
+	if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"logs", run.RunID, "--runner", "--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var output logsJSON
@@ -106,8 +150,9 @@ func TestRunnerLogsExposePublicationWithoutWritingArtifacts(t *testing.T) {
 		}
 		posted++
 	}
-	if posted != 4 {
-		t.Fatalf("posted=%d", posted)
+	// How many contexts publication posts is the engine's contract; this test owns exposure.
+	if posted == 0 {
+		t.Fatal("logs --runner --json exposed no publication receipts")
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {

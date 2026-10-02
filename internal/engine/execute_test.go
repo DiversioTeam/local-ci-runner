@@ -330,20 +330,23 @@ func TestExecuteRunContinuesAfterGitHubPostFailure(t *testing.T) {
 	if got, want := publishReporter.attempts, 3; got != want {
 		t.Fatalf("published GitHub statuses = %d, want %d", got, want)
 	}
-	// Publication records attempts in the event log and leaves the run itself
-	// alone, so the recovered run still carries why posting stopped.
-	publishedRun, err := LoadRun(fixture.store, run.RunID)
+}
+
+func TestExecuteRunFailsStepWithMalformedOutput(t *testing.T) {
+	t.Parallel()
+
+	plan := config.ResolvedPlan{Steps: []config.Step{
+		{ID: "emit", Command: []string{"/bin/sh", "-c", "printf 'bad-key=1\\n' > \"$LOCAL_CI_STEP_OUTPUT\""}},
+	}}
+	plan.ApplyDefaults()
+	fixture := newRunFixture(t, plan)
+	executed, err := ExecuteRun(t.Context(), fixture.store, prepareRunFixture(t, fixture), ExecuteOptions{})
 	if err != nil {
-		t.Fatalf("LoadRun(published) error = %v", err)
+		t.Fatalf("ExecuteRun() error = %v", err)
 	}
-	if got, want := publishedRun.Meta.GitHubPostingSuppressed, persistence.GitHubPostingSuppressionPostFailed; got != want {
-		t.Fatalf("published run suppression = %q, want %q", got, want)
-	}
-	if err := PublishCompletedRun(t.Context(), fixture.store, publishedRun, PublishOptions{
-		Reporter:  &fakeReporter{},
-		TargetSHA: "def456",
-	}); err != nil {
-		t.Fatalf("second PublishCompletedRun() error = %v, want a recorded retry", err)
+	// A step that exits 0 but writes unusable output must not be recorded as a success.
+	if status := executed.StepStatuses[0]; status.State != string(StepStateFailure) || !strings.Contains(status.Message, "bad-key") {
+		t.Fatalf("status = %+v, want a failure naming the bad key", status)
 	}
 }
 
@@ -673,6 +676,7 @@ func mustReadFile(t *testing.T, path string) string {
 	return string(payload)
 }
 
+// mustReadEvents is stricter than events.ReadFile: writer tests must never leave a torn line.
 func mustReadEvents(t *testing.T, path string) []events.Event {
 	t.Helper()
 

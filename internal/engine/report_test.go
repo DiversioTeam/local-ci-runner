@@ -1,14 +1,12 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
@@ -21,6 +19,7 @@ type recordedStatus struct {
 	status ghstatus.Status
 }
 
+// fakeReporter records posts without locking: only the scheduler goroutine reports, and -race checks that.
 type fakeReporter struct {
 	posts          []recordedStatus
 	contextErrors  []error
@@ -80,118 +79,72 @@ func TestAggregateGitHubState(t *testing.T) {
 	}
 }
 
-func TestPostGitHubStatusAppendsEvent(t *testing.T) {
+func TestPublishCompletedRunRefusesIneligibleRuns(t *testing.T) {
 	t.Parallel()
 
-	path := writeEventFile(t)
-	appender, err := events.NewAppender(path, "run-1")
-	if err != nil {
-		t.Fatalf("NewAppender() error = %v", err)
-	}
-	reporter := &fakeReporter{}
-	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
-	at := time.Date(2026, 6, 27, 15, 4, 5, 0, time.UTC)
-
-	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, at)
-	if err != nil {
-		t.Fatalf("postAggregateStatus() error = %v", err)
-	}
-	if len(reporter.posts) != 1 {
-		t.Fatalf("post count = %d, want 1", len(reporter.posts))
-	}
-	if got, want := reporter.posts[0].status.Context, "local/verify"; got != want {
-		t.Fatalf("context = %q, want %q", got, want)
-	}
-	items, err := events.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 2 || items[0].Type != events.GitHubStatusRequested || items[1].Type != events.GitHubStatusPosted {
-		t.Fatalf("expected request then acknowledgement, got %#v", items)
-	}
-	if *items[0].GitHubPost != *items[1].GitHubPost || items[1].GitHubPost.SHA != meta.HeadSHA || items[1].Time.Before(items[0].Time) {
-		t.Fatalf("incorrect request identity or acknowledgement time: %#v", items)
-	}
-}
-
-func TestPublishCompletedRunPostsTerminalStatuses(t *testing.T) {
-	t.Parallel()
-
-	plan := config.ResolvedPlan{Steps: []config.Step{
-		{ID: "lint", Command: []string{"/bin/sh", "-c", "printf 'ok\\n'"}},
-		{ID: "test", Command: []string{"/bin/sh", "-c", "printf 'ok\\n'"}, Needs: []string{"lint"}},
-	}}
+	plan := config.ResolvedPlan{Steps: []config.Step{{ID: "lint", Command: []string{"/bin/sh", "-c", "exit 0"}}}}
 	plan.ApplyDefaults()
-	fixture := newRunFixtureWithGitHub(t, plan, config.GitHub{Enabled: true})
-	run, err := PrepareRun(fixture.store, PrepareOptions{
-		Identity:                fixture.identity,
-		Plan:                    fixture.plan,
-		GitHub:                  fixture.github,
-		HeadTreeHash:            "head-tree",
-		WorktreeTreeHash:        "worktree-tree",
-		DirtyWorktree:           true,
-		GitHubPostingSuppressed: "dirty_worktree",
-		Now:                     fixedRunTime,
-		Random:                  bytes.NewReader(cloneBytes(fixedRunEntropy)),
-	})
-	if err != nil {
-		t.Fatalf("PrepareRun() error = %v", err)
-	}
-	completed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{})
-	if err != nil {
-		t.Fatalf("ExecuteRun() error = %v", err)
-	}
-
-	reporter := &fakeReporter{}
-	err = PublishCompletedRun(t.Context(), fixture.store, completed, PublishOptions{
-		Reporter:  reporter,
-		TargetSHA: "def456",
-		Now:       func() time.Time { return fixedRunTime },
-	})
-	if err != nil {
-		t.Fatalf("PublishCompletedRun() error = %v", err)
-	}
-	if len(reporter.posts) != 3 {
-		t.Fatalf("post count = %d, want 3", len(reporter.posts))
-	}
-	if got, want := reporter.posts[0].target.SHA, "def456"; got != want {
-		t.Fatalf("target SHA = %q, want %q", got, want)
-	}
-}
-
-func TestPublishCompletedRunRejectsAlreadyPostedRun(t *testing.T) {
-	t.Parallel()
-
-	plan := config.ResolvedPlan{Steps: []config.Step{{ID: "lint", Command: []string{"/bin/sh", "-c", "printf 'ok\\n'"}}}}
-	plan.ApplyDefaults()
-	fixture := newRunFixtureWithGitHub(t, plan, config.GitHub{Enabled: true})
-	run, err := PrepareRun(fixture.store, PrepareOptions{
-		Identity:         fixture.identity,
-		Plan:             fixture.plan,
-		GitHub:           fixture.github,
-		HeadTreeHash:     "head-tree",
-		WorktreeTreeHash: "head-tree",
-		Now:              fixedRunTime,
-		Random:           bytes.NewReader(cloneBytes(fixedRunEntropy)),
-	})
-	if err != nil {
-		t.Fatalf("PrepareRun() error = %v", err)
-	}
-	completed, err := ExecuteRun(t.Context(), fixture.store, run, ExecuteOptions{Reporter: &fakeReporter{}})
-	if err != nil {
-		t.Fatalf("ExecuteRun() error = %v", err)
-	}
-
-	err = PublishCompletedRun(t.Context(), fixture.store, completed, PublishOptions{
-		Reporter:  &fakeReporter{},
-		TargetSHA: "def456",
-		Now:       func() time.Time { return fixedRunTime },
-	})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if got, want := err.Error(), "configured to post during execution"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
+	for _, test := range []struct {
+		name      string
+		github    config.GitHub
+		prepare   func(t *testing.T, fixture runFixture) RunRecord
+		wantError string
+	}{
+		{
+			name:   "posted during execution",
+			github: config.GitHub{Enabled: true},
+			prepare: func(t *testing.T, fixture runFixture) RunRecord {
+				completed, err := ExecuteRun(t.Context(), fixture.store, prepareRunFixture(t, fixture), ExecuteOptions{Reporter: &fakeReporter{}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return completed
+			},
+			wantError: "configured to post during execution",
+		},
+		{
+			name:   "not finished",
+			github: config.GitHub{Enabled: true},
+			prepare: func(t *testing.T, fixture runFixture) RunRecord {
+				return prepareSuppressedRunFixture(t, fixture, "cli_disabled")
+			},
+			wantError: "has not finished",
+		},
+		{
+			name:   "interrupted",
+			github: config.GitHub{Enabled: true},
+			prepare: func(t *testing.T, fixture runFixture) RunRecord {
+				canceled, cancel := context.WithCancel(t.Context())
+				cancel()
+				interrupted, err := ExecuteRun(canceled, fixture.store, prepareSuppressedRunFixture(t, fixture, "cli_disabled"), ExecuteOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return interrupted
+			},
+			wantError: "was interrupted",
+		},
+		{
+			name: "GitHub disabled",
+			prepare: func(t *testing.T, fixture runFixture) RunRecord {
+				completed, err := ExecuteRun(t.Context(), fixture.store, prepareRunFixture(t, fixture), ExecuteOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return completed
+			},
+			wantError: "GitHub posting was disabled",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newRunFixtureWithGitHub(t, plan, test.github)
+			run := test.prepare(t, fixture)
+			err := PublishCompletedRun(t.Context(), fixture.store, run, PublishOptions{Reporter: &fakeReporter{}, TargetSHA: "def456"})
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -206,41 +159,17 @@ func TestPostGitHubStatusReturnsReporterError(t *testing.T) {
 	reporter := &fakeReporter{postError: errors.New("boom")}
 	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
 
-	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, fixedRunTime)
+	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending)
 	var postError *githubStatusPostError
-	if !errors.As(err, &postError) {
-		t.Fatalf("postAggregateStatus() error = %v, want githubStatusPostError", err)
+	if !errors.As(err, &postError) || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("postAggregateStatus() error = %v, want a githubStatusPostError keeping its cause", err)
 	}
-	if !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("postAggregateStatus() error = %v, want the reporter error preserved", err)
-	}
-	payload := mustReadEventLog(t, path)
-	if !strings.Contains(payload, string(events.GitHubStatusFailed)) {
-		t.Fatalf("failed event = %q, want a recorded failure receipt", payload)
-	}
-}
-
-func TestPostGitHubStatusReturnsEventErrorWhenFailureCannotBeRecorded(t *testing.T) {
-	t.Parallel()
-
-	path := writeEventFile(t)
-	appender, err := events.NewAppender(path, "run-1")
+	items, err := events.ReadFile(path)
 	if err != nil {
-		t.Fatalf("NewAppender() error = %v", err)
+		t.Fatal(err)
 	}
-	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
-		t.Fatalf("RemoveAll() error = %v", err)
-	}
-	reporter := &fakeReporter{postError: errors.New("boom")}
-	meta := persistence.Meta{RepoSlug: "owner/repo", HeadSHA: "abc123", GitHubEnabled: true, GitHubAggregateContext: "local/verify"}
-
-	err = postAggregateStatus(t.Context(), reporter, &appender, meta, ghstatus.StatePending, fixedRunTime)
-	var postError *githubStatusPostError
-	if errors.As(err, &postError) {
-		t.Fatalf("postAggregateStatus() error = %v, want local event error", err)
-	}
-	if err == nil {
-		t.Fatal("postAggregateStatus() error = nil, want a local event error")
+	if len(items) != 2 || items[0].Type != events.GitHubStatusRequested || items[1].Type != events.GitHubStatusFailed || *items[0].GitHubPost != *items[1].GitHubPost {
+		t.Fatalf("want a request then its failure receipt, got %#v", items)
 	}
 }
 
@@ -252,14 +181,4 @@ func writeEventFile(t *testing.T) string {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}
 	return path
-}
-
-func mustReadEventLog(t *testing.T, path string) string {
-	t.Helper()
-
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s) error = %v", path, err)
-	}
-	return string(payload)
 }

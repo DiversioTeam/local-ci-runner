@@ -30,23 +30,22 @@ func TestStaticPlanDeepCopiesSteps(t *testing.T) {
 	}
 }
 
-func TestResolvedPlanApplyDefaults(t *testing.T) {
+// Engine applies defaults to a clone; the caller's plan must not change underneath it.
+func TestResolvedPlanCloneIsDeep(t *testing.T) {
 	t.Parallel()
 
-	plan := ResolvedPlan{Steps: []Step{{
-		ID:      "lint",
-		Command: []string{"./scripts/lint.sh"},
-	}}}
-
-	plan.ApplyDefaults()
-
-	if got, want := plan.Steps[0].Name, "lint"; got != want {
-		t.Fatalf("step name = %q, want %q", got, want)
+	original := ResolvedPlan{
+		Env:   map[string]string{"SCOPE": "python"},
+		Steps: []Step{{ID: "lint", Command: []string{"./lint.sh"}, Needs: []string{"fmt"}, Env: map[string]string{"FOO": "bar"}}},
 	}
-	if got, want := plan.Steps[0].Dir, DefaultWorkingDir; got != want {
-		t.Fatalf("step dir = %q, want %q", got, want)
-	}
-	if got, want := plan.Steps[0].GitHubContext, "local/lint"; got != want {
-		t.Fatalf("step context = %q, want %q", got, want)
+	clone := original.Clone()
+	clone.Env["SCOPE"] = "js"
+	clone.Steps[0].Command[0] = "./other.sh"
+	clone.Steps[0].Needs[0] = "test"
+	clone.Steps[0].Env["FOO"] = "baz"
+	clone.ApplyDefaults()
+
+	if original.Env["SCOPE"] != "python" || original.Steps[0].Command[0] != "./lint.sh" || original.Steps[0].Needs[0] != "fmt" || original.Steps[0].Env["FOO"] != "bar" || original.Steps[0].Name != "" {
+		t.Fatalf("clone shares state with the original: %+v", original)
 	}
 }

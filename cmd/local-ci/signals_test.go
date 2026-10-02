@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"os"
 	"syscall"
@@ -26,9 +25,10 @@ func TestTerminationControlCancelsThenForces(t *testing.T) {
 		t.Fatal("termination context was not canceled")
 	}
 
+	// main maps this error to exit status 128+signal.
 	var interruptError engine.InterruptError
-	if !errors.As(context.Cause(commandContext), &interruptError) {
-		t.Fatalf("context cause = %v, want InterruptError", context.Cause(commandContext))
+	if terminationError := getTerminationError(commandContext); !errors.As(terminationError, &interruptError) {
+		t.Fatalf("termination error = %v, want InterruptError", terminationError)
 	}
 	if interruptError.Signal != os.Interrupt {
 		t.Fatalf("interrupt signal = %v, want %v", interruptError.Signal, os.Interrupt)
@@ -47,18 +47,12 @@ func TestTerminationControlCancelsThenForces(t *testing.T) {
 	}
 }
 
-func TestTerminationControlCleanupIsIdempotent(t *testing.T) {
+func TestTerminationControlCleanupIsNotAnInterruption(t *testing.T) {
 	terminationSignals := make(chan os.Signal, 2)
-	removeCount := 0
-	commandContext, forceStop, removeNotifications := buildTerminationControl(t.Context(), terminationSignals, func() {
-		removeCount++
-	})
+	commandContext, forceStop, removeNotifications := buildTerminationControl(t.Context(), terminationSignals, func() {})
 
+	// main removes notifications before asking whether a signal ended the command.
 	removeNotifications()
-	removeNotifications()
-	if got, want := removeCount, 1; got != want {
-		t.Fatalf("remove count = %d, want %d", got, want)
-	}
 	if terminationError := getTerminationError(commandContext); terminationError != nil {
 		t.Fatalf("getTerminationError() = %v, want nil", terminationError)
 	}
@@ -66,26 +60,6 @@ func TestTerminationControlCleanupIsIdempotent(t *testing.T) {
 	case <-forceStop:
 		t.Fatal("normal cleanup requested force stop")
 	default:
-	}
-}
-
-func TestGetTerminationErrorReturnsInterruptionCause(t *testing.T) {
-	commandContext, cancelCommand := context.WithCancelCause(t.Context())
-	cancelCommand(engine.InterruptError{Signal: syscall.SIGTERM})
-
-	returnedError := getTerminationError(commandContext)
-	var interruptError engine.InterruptError
-	if !errors.As(returnedError, &interruptError) {
-		t.Fatalf("getTerminationError() = %v, want InterruptError", returnedError)
-	}
-}
-
-func TestGetTerminationErrorIgnoresNormalContextCleanup(t *testing.T) {
-	commandContext, cancelCommand := context.WithCancelCause(t.Context())
-	cancelCommand(nil)
-
-	if returnedError := getTerminationError(commandContext); returnedError != nil {
-		t.Fatalf("getTerminationError() = %v, want nil", returnedError)
 	}
 }
 

@@ -175,10 +175,6 @@ func (c *cli) updateCommand(commandContext context.Context, args []string) error
 	return update.Updater{Stdout: c.stdout}.Apply(commandContext)
 }
 
-func (c *cli) run(args []string) error {
-	return c.runWithContext(context.Background(), nil, args)
-}
-
 func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
 	if len(args) == 0 {
 		c.printTopHelp()
@@ -298,7 +294,7 @@ func (c *cli) helpCommand(args []string) error {
 }
 
 func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
-	opts, err := parseExecutionArgs(args, false)
+	opts, _, err := parseExecutionArgs(args, false)
 	if err != nil {
 		return err
 	}
@@ -749,6 +745,8 @@ func toPersistedWorktreeFiles(src []gitrepo.WorktreeFile) []persistence.Worktree
 // A completed dirty-worktree run can only be published later when the current
 // clean checkout still represents the exact same code and plan snapshot.
 // Otherwise we would be attaching an old local result to new code.
+// validatePublishableRun refuses a run whose identity or snapshot no longer matches the clean
+// checkout. Run-state eligibility (finished, not interrupted, suppressed) is the engine's check.
 func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run engine.RunRecord) error {
 	if run.Meta.RepoRoot != repo.Root {
 		return fmt.Errorf("publish refused: repo root changed")
@@ -764,18 +762,6 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 	}
 	if run.Meta.PlanHash != identity.PlanHash {
 		return fmt.Errorf("publish refused: plan hash changed")
-	}
-	if run.Meta.FinishedAt == nil || run.Summary.Status == "pending" {
-		return fmt.Errorf("publish refused: run %s has not finished", run.RunID)
-	}
-	if run.Summary.Status == string(engine.StepStateInterrupted) {
-		return fmt.Errorf("publish refused: run %s was interrupted", run.RunID)
-	}
-	if !run.Meta.GitHubEnabled {
-		return fmt.Errorf("publish refused: GitHub posting was disabled for this run")
-	}
-	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
-		return fmt.Errorf("publish refused: run %s was configured to post during execution; publish requires a suppressed run (inspect receipts; configuration is not proof of publication)", run.RunID)
 	}
 	if repo.DirtyWorktree {
 		return fmt.Errorf("publish refused: current worktree is dirty")
@@ -928,7 +914,8 @@ func failedSummary(summaryStatus string) bool {
 	}
 }
 
-func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOptions, error) {
+// parseExecutionArgs is the one parser for execution flags; it returns the remaining positionals.
+func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOptions, []string, error) {
 	opts := executionCLIOptions{configPath: config.DefaultPath}
 	positionals := make([]string, 0)
 	for index := 0; index < len(args); index++ {
@@ -937,16 +924,16 @@ func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOption
 		case strings.HasPrefix(arg, "--config="):
 			value := strings.TrimPrefix(arg, "--config=")
 			if err := requireFlagValue("--config", value); err != nil {
-				return executionCLIOptions{}, err
+				return executionCLIOptions{}, nil, err
 			}
 			opts.configPath = value
 		case arg == "--config":
 			index++
 			if index >= len(args) {
-				return executionCLIOptions{}, fmt.Errorf("--config requires a value")
+				return executionCLIOptions{}, nil, fmt.Errorf("--config requires a value")
 			}
 			if err := requireFlagValue("--config", args[index]); err != nil {
-				return executionCLIOptions{}, err
+				return executionCLIOptions{}, nil, err
 			}
 			opts.configPath = args[index]
 		case arg == "--no-github":
@@ -958,13 +945,13 @@ func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOption
 			if arg == "--max-parallel" {
 				index++
 				if index >= len(args) {
-					return executionCLIOptions{}, fmt.Errorf("--max-parallel requires a positive integer")
+					return executionCLIOptions{}, nil, fmt.Errorf("--max-parallel requires a positive integer")
 				}
 				value = args[index]
 			}
 			count, err := strconv.Atoi(value)
 			if err != nil || count <= 0 {
-				return executionCLIOptions{}, fmt.Errorf("--max-parallel requires a positive integer")
+				return executionCLIOptions{}, nil, fmt.Errorf("--max-parallel requires a positive integer")
 			}
 			opts.maxParallel = count
 		case arg == "--from-step" || strings.HasPrefix(arg, "--from-step="):
@@ -972,32 +959,31 @@ func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOption
 			if arg == "--from-step" {
 				index++
 				if index >= len(args) {
-					return executionCLIOptions{}, fmt.Errorf("--from-step requires a step id")
+					return executionCLIOptions{}, nil, fmt.Errorf("--from-step requires a step id")
 				}
 				value = args[index]
 			}
 			if err := requireFlagValue("--from-step", value); err != nil {
-				return executionCLIOptions{}, err
+				return executionCLIOptions{}, nil, err
 			}
 			opts.fromStep = value
 		case strings.HasPrefix(arg, "-"):
-			return executionCLIOptions{}, fmt.Errorf("unknown flag %q", arg)
+			return executionCLIOptions{}, nil, fmt.Errorf("unknown flag %q", arg)
 		default:
 			positionals = append(positionals, arg)
 		}
 	}
 	if !allowPositional && len(positionals) > 0 {
-		return executionCLIOptions{}, fmt.Errorf("unexpected positional arguments: %s", strings.Join(positionals, " "))
+		return executionCLIOptions{}, nil, fmt.Errorf("unexpected positional arguments: %s", strings.Join(positionals, " "))
 	}
-	return opts, nil
+	return opts, positionals, nil
 }
 
 func parseExecutionAndRunIDArgs(args []string) (executionCLIOptions, string, error) {
-	opts, err := parseExecutionArgs(args, true)
+	opts, positionals, err := parseExecutionArgs(args, true)
 	if err != nil {
 		return executionCLIOptions{}, "", err
 	}
-	positionals := collectExecutionPositionals(args)
 	if len(positionals) != 1 {
 		return executionCLIOptions{}, "", fmt.Errorf("resume requires exactly one run id")
 	}
@@ -1153,23 +1139,6 @@ func resolveLogSelection(opts logsOptions) (string, string, error) {
 		return "step", view, nil
 	}
 	return "runner", "", nil
-}
-
-func collectExecutionPositionals(args []string) []string {
-	positionals := make([]string, 0)
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		switch {
-		case arg == "--config" || arg == "--max-parallel" || arg == "--from-step":
-			index++
-		case strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--max-parallel=") || strings.HasPrefix(arg, "--from-step="):
-		case arg == "--no-github":
-		case strings.HasPrefix(arg, "-"):
-		default:
-			positionals = append(positionals, arg)
-		}
-	}
-	return positionals
 }
 
 func requireFlagValue(flag string, value string) error {

@@ -71,7 +71,6 @@ func postAggregateStatus(
 	appender *events.Appender,
 	meta persistence.Meta,
 	state ghstatus.State,
-	at time.Time,
 ) error {
 	if !githubPostingEnabled(meta, reporter) {
 		return nil
@@ -82,7 +81,7 @@ func postAggregateStatus(
 		State:       state,
 		Description: aggregateDescription(state),
 	}
-	return postGitHubStatus(ctx, reporter, appender, meta, "", status, at)
+	return postGitHubStatus(ctx, reporter, appender, meta, "", status)
 }
 
 func postStepPendingStatus(
@@ -91,7 +90,6 @@ func postStepPendingStatus(
 	appender *events.Appender,
 	meta persistence.Meta,
 	status persistence.StepStatus,
-	at time.Time,
 ) error {
 	if !githubPostingEnabled(meta, reporter) {
 		return nil
@@ -102,7 +100,7 @@ func postStepPendingStatus(
 		State:       ghstatus.StatePending,
 		Description: stepDescriptionRunning,
 	}
-	return postGitHubStatus(ctx, reporter, appender, meta, status.StepID, githubStatus, at)
+	return postGitHubStatus(ctx, reporter, appender, meta, status.StepID, githubStatus)
 }
 
 func postStepTerminalStatus(
@@ -111,7 +109,6 @@ func postStepTerminalStatus(
 	appender *events.Appender,
 	meta persistence.Meta,
 	status persistence.StepStatus,
-	at time.Time,
 ) error {
 	if !githubPostingEnabled(meta, reporter) {
 		return nil
@@ -122,7 +119,7 @@ func postStepTerminalStatus(
 		State:       stepGitHubState(status.State),
 		Description: stepDescription(status.State),
 	}
-	return postGitHubStatus(ctx, reporter, appender, meta, status.StepID, githubStatus, at)
+	return postGitHubStatus(ctx, reporter, appender, meta, status.StepID, githubStatus)
 }
 
 // A shared context passes only when every step using it passed or was skipped.
@@ -151,7 +148,6 @@ func postGitHubStatus(
 	meta persistence.Meta,
 	stepID string,
 	status ghstatus.Status,
-	_ time.Time,
 ) error {
 	// The run owns its aggregate context, even when a step uses the same name.
 	if stepID != "" && status.Context == meta.GitHubAggregateContext {

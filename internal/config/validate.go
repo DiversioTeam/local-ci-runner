@@ -9,7 +9,7 @@ import (
 
 var stepIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-func (f File) Validate() error {
+func (f File) validate() error {
 	if f.Version != 1 {
 		return fmt.Errorf("version must be 1")
 	}

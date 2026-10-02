@@ -30,7 +30,7 @@ func addStepsForExecution(ctx context.Context, store persistence.Store, run *Run
 			if err := appender.Append(at, events.StepStale, status.StepID, string(StepStateStale), "rerun from "+opts.FromStep); err != nil {
 				return err
 			}
-			postError := postStepPendingStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, status, at)
+			postError := postStepPendingStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, status)
 			if err := tolerateGitHubPostFailure(store, run, postError); err != nil {
 				return err
 			}
@@ -187,6 +187,6 @@ func addUnexecutedStep(ctx context.Context, store persistence.Store, run *RunRec
 	}
 	printProgress(opts.Progress, "%s %s (%s)\n", state, status.StepID, message)
 	contextStatus := getContextStepStatus(run.StepStatuses, *status)
-	postError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, contextStatus, at, opts.finalReportContext)
+	postError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, contextStatus, opts.finalReportContext)
 	return tolerateGitHubPostFailure(store, run, postError)
 }

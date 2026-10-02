@@ -34,16 +34,17 @@ type CacheEntry struct {
 	LatestURL      string    `json:"latest_url,omitempty"`
 }
 
+// Checker finds the latest release. The zero value checks the real release feed; the
+// fields point it at a local server, a scratch cache, or an unresolved binary path.
 type Checker struct {
 	CurrentVersion   string
-	Repo             string
 	LatestReleaseURL string
 	CachePath        string
-	CacheTTL         time.Duration
-	HTTPClient       *http.Client
-	Now              func() time.Time
 	ExecutablePath   string
 }
+
+// noticeClient keeps the passive update notice cheap: it is a hint on a small JSON document.
+var noticeClient = &http.Client{Timeout: 1200 * time.Millisecond}
 
 type releaseResponse struct {
 	TagName string `json:"tag_name"`
@@ -72,12 +73,12 @@ func (checker Checker) Notice(ctx context.Context) (string, error) {
 }
 
 func (checker Checker) executablePath() (string, error) {
-	if strings.TrimSpace(checker.ExecutablePath) != "" {
-		return checker.ExecutablePath, nil
-	}
-	executablePath, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("resolve executable path: %w", err)
+	executablePath := checker.ExecutablePath
+	if strings.TrimSpace(executablePath) == "" {
+		var err error
+		if executablePath, err = os.Executable(); err != nil {
+			return "", fmt.Errorf("resolve executable path: %w", err)
+		}
 	}
 	// Homebrew puts a symlink on PATH and keeps the real binary in the Cellar,
 	// so only the resolved path reveals a Homebrew install. Falling back to the
@@ -110,13 +111,6 @@ func (checker Checker) currentVersion() string {
 	return Version
 }
 
-func (checker Checker) repo() string {
-	if strings.TrimSpace(checker.Repo) != "" {
-		return checker.Repo
-	}
-	return DefaultRepo
-}
-
 func (checker Checker) cachePath() (string, error) {
 	if strings.TrimSpace(checker.CachePath) != "" {
 		return checker.CachePath, nil
@@ -128,32 +122,11 @@ func (checker Checker) cachePath() (string, error) {
 	return filepath.Join(cacheRoot, "local-ci-runner", "update-check.json"), nil
 }
 
-func (checker Checker) cacheTTL() time.Duration {
-	if checker.CacheTTL > 0 {
-		return checker.CacheTTL
-	}
-	return DefaultCacheTTL
-}
-
-func (checker Checker) httpClient() *http.Client {
-	if checker.HTTPClient != nil {
-		return checker.HTTPClient
-	}
-	return &http.Client{Timeout: 1200 * time.Millisecond}
-}
-
-func (checker Checker) now() time.Time {
-	if checker.Now != nil {
-		return checker.Now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 func (checker Checker) latestReleaseURL() string {
 	if strings.TrimSpace(checker.LatestReleaseURL) != "" {
 		return checker.LatestReleaseURL
 	}
-	return fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", checker.repo())
+	return fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", DefaultRepo)
 }
 
 func (checker Checker) loadOrRefresh(ctx context.Context) (CacheEntry, error) {
@@ -168,7 +141,7 @@ func (checker Checker) loadOrRefresh(ctx context.Context) (CacheEntry, error) {
 	if ok {
 		return entry, nil
 	}
-	entry, err = checker.fetchLatest(ctx)
+	entry, err = checker.fetchLatest(ctx, noticeClient)
 	if err != nil {
 		return CacheEntry{}, err
 	}
@@ -193,13 +166,13 @@ func (checker Checker) loadFreshCache(path string) (CacheEntry, bool, error) {
 	if entry.CurrentVersion != checker.currentVersion() {
 		return CacheEntry{}, false, nil
 	}
-	if checker.now().Sub(entry.CheckedAt) > checker.cacheTTL() {
+	if time.Now().UTC().Sub(entry.CheckedAt) > DefaultCacheTTL {
 		return CacheEntry{}, false, nil
 	}
 	return entry, true, nil
 }
 
-func (checker Checker) fetchLatest(ctx context.Context) (CacheEntry, error) {
+func (checker Checker) fetchLatest(ctx context.Context, client *http.Client) (CacheEntry, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, checker.latestReleaseURL(), nil)
 	if err != nil {
 		return CacheEntry{}, fmt.Errorf("build update request: %w", err)
@@ -207,7 +180,7 @@ func (checker Checker) fetchLatest(ctx context.Context) (CacheEntry, error) {
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "local-ci-runner/"+checker.currentVersion())
 
-	response, err := checker.httpClient().Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return CacheEntry{}, fmt.Errorf("fetch latest release: %w", err)
 	}
@@ -215,7 +188,7 @@ func (checker Checker) fetchLatest(ctx context.Context) (CacheEntry, error) {
 		_ = response.Body.Close()
 	}()
 	if response.StatusCode == http.StatusNotFound {
-		return CacheEntry{CurrentVersion: checker.currentVersion(), CheckedAt: checker.now()}, nil
+		return CacheEntry{CurrentVersion: checker.currentVersion(), CheckedAt: time.Now().UTC()}, nil
 	}
 	if response.StatusCode != http.StatusOK {
 		payload, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
@@ -228,7 +201,7 @@ func (checker Checker) fetchLatest(ctx context.Context) (CacheEntry, error) {
 	}
 	return CacheEntry{
 		CurrentVersion: checker.currentVersion(),
-		CheckedAt:      checker.now(),
+		CheckedAt:      time.Now().UTC(),
 		LatestVersion:  strings.TrimSpace(release.TagName),
 		LatestURL:      strings.TrimSpace(release.HTMLURL),
 	}, nil

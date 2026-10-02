@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,9 +78,7 @@ func newTestUpdater(t *testing.T, server *httptest.Server, currentVersion string
 			CurrentVersion:   currentVersion,
 			LatestReleaseURL: server.URL + "/releases/latest",
 			CachePath:        filepath.Join(t.TempDir(), "update.json"),
-			HTTPClient:       server.Client(),
 			ExecutablePath:   executablePath,
-			Now:              func() time.Time { return time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC) },
 		},
 		Stdout:          &bytes.Buffer{},
 		DownloadBaseURL: server.URL + "/download",
@@ -189,31 +186,6 @@ func TestUpdaterApplyNoopWhenCurrent(t *testing.T) {
 	}
 }
 
-func TestUpdaterApplyUsesHomebrewForCellarInstall(t *testing.T) {
-	t.Parallel()
-
-	archive := buildReleaseArchive(t, "new-binary-contents")
-	server := releaseServer(t, "v0.2.0", archive, false)
-	defer server.Close()
-
-	executablePath := "/opt/homebrew/Cellar/local-ci/0.1.0/bin/local-ci"
-	updater := newTestUpdater(t, server, "v0.1.0", executablePath)
-
-	var commands [][]string
-	updater.RunCommand = func(_ context.Context, name string, args ...string) error {
-		commands = append(commands, append([]string{name}, args...))
-		return nil
-	}
-	if err := updater.Apply(context.Background()); err != nil {
-		t.Fatalf("Apply() error = %v", err)
-	}
-
-	want := [][]string{{"brew", "update"}, {"brew", "upgrade", "local-ci"}}
-	if fmt.Sprint(commands) != fmt.Sprint(want) {
-		t.Fatalf("commands = %v, want %v", commands, want)
-	}
-}
-
 func TestUpdaterApplyRejectsDevelopmentBuild(t *testing.T) {
 	t.Parallel()
 
@@ -249,9 +221,8 @@ func TestExtractBinaryRejectsArchiveWithoutBinary(t *testing.T) {
 }
 
 // TestUpdaterApplyToleratesSlowDownload pins the bug that the release download
-// must not inherit the update notice's ~1s budget. It deliberately leaves
-// HTTPClient unset so it exercises the client the CLI actually gets; injecting
-// a test client here is what hid the problem in the first place.
+// must not inherit the update notice's ~1s budget. Updates always use the client
+// the CLI gets; an injectable test client is what hid the problem in the first place.
 func TestUpdaterApplyToleratesSlowDownload(t *testing.T) {
 	t.Parallel()
 
@@ -304,27 +275,61 @@ func TestUpdaterApplyToleratesSlowDownload(t *testing.T) {
 	}
 }
 
-// TestUpdaterApplyReportsMissingHomebrew covers the branch where the binary
-// sits in a Homebrew prefix but brew is not installed. It drives that through
-// the injected command runner so the result does not depend on whether the
-// machine running the tests happens to have Homebrew.
-func TestUpdaterApplyReportsMissingHomebrew(t *testing.T) {
-	t.Parallel()
+// newHomebrewInstall returns the PATH entry Homebrew would create: a symlink to a binary in the
+// Cellar. Only resolving that symlink reveals a Homebrew install.
+func newHomebrewInstall(t *testing.T) string {
+	t.Helper()
 
-	archive := buildReleaseArchive(t, "new-binary-contents")
-	server := releaseServer(t, "v0.2.0", archive, false)
+	prefix := t.TempDir()
+	cellarBinary := filepath.Join(prefix, "Cellar", "local-ci", "0.1.0", "bin", "local-ci")
+	if err := os.MkdirAll(filepath.Dir(cellarBinary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cellarBinary, []byte("brew-managed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(prefix, "bin", "local-ci")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(cellarBinary, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	return linkPath
+}
+
+// The Homebrew tests change PATH, so they cannot run in parallel.
+func TestUpdaterApplyUsesHomebrewForCellarInstall(t *testing.T) {
+	server := releaseServer(t, "v0.2.0", buildReleaseArchive(t, "new-binary-contents"), false)
 	defer server.Close()
-
-	updater := newTestUpdater(t, server, "v0.1.0", "/opt/homebrew/Cellar/local-ci/0.1.0/bin/local-ci")
-	updater.RunCommand = func(_ context.Context, name string, _ ...string) error {
-		return &exec.Error{Name: name, Err: exec.ErrNotFound}
+	brewDir := t.TempDir()
+	brewLog := filepath.Join(t.TempDir(), "brew.log")
+	if err := os.WriteFile(filepath.Join(brewDir, "brew"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$BREW_LOG\"\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
+	t.Setenv("PATH", brewDir)
+	t.Setenv("BREW_LOG", brewLog)
+	linkPath := newHomebrewInstall(t)
 
-	err := updater.Apply(context.Background())
-	if err == nil {
-		t.Fatal("expected an error when brew is missing")
+	if err := newTestUpdater(t, server, "v0.1.0", linkPath).Apply(context.Background()); err != nil {
+		t.Fatalf("Apply() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "brew is not on PATH") {
+	// brew upgrade only sees the new version after the tap is refreshed.
+	if got, err := os.ReadFile(brewLog); err != nil || string(got) != "update\nupgrade local-ci\n" {
+		t.Fatalf("brew calls = %q, error = %v", got, err)
+	}
+	if got, _ := os.ReadFile(linkPath); string(got) != "brew-managed" {
+		t.Fatal("a Homebrew install was overwritten instead of handed to brew")
+	}
+}
+
+func TestUpdaterApplyReportsMissingHomebrew(t *testing.T) {
+	server := releaseServer(t, "v0.2.0", buildReleaseArchive(t, "new-binary-contents"), false)
+	defer server.Close()
+	t.Setenv("PATH", t.TempDir())
+
+	err := newTestUpdater(t, server, "v0.1.0", newHomebrewInstall(t)).Apply(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "brew is not on PATH") {
 		t.Fatalf("Apply() error = %v, want it to explain that brew is missing", err)
 	}
 }

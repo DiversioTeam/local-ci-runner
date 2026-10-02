@@ -8,7 +8,8 @@ const (
 	githubTokenEnvVar = "GITHUB_TOKEN"
 )
 
-func CLIEnv(base []string, token string) []string {
+// cliEnv drops inherited generic GitHub tokens, so only LOCAL_CI_GITHUB_TOKEN or gh auth can post.
+func cliEnv(base []string, token string) []string {
 	env := make([]string, 0, len(base)+2)
 	for _, item := range base {
 		key, _, ok := strings.Cut(item, "=")

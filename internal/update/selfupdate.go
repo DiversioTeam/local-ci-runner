@@ -34,10 +34,12 @@ const maxDownloadSize = 256 << 20
 // archive on anything but a fast link would abort part way through.
 const updateTimeout = 5 * time.Minute
 
+var updateClient = &http.Client{Timeout: updateTimeout}
+
 // Updater moves the running binary to the latest published release.
 //
-// The zero value works. The remaining fields exist so tests can point the
-// updater at a local server and a scratch platform instead of the real ones.
+// The zero value works. DownloadBaseURL and Platform point the updater at a local
+// server and a scratch build instead of the real release.
 type Updater struct {
 	Checker Checker
 	Stdout  io.Writer
@@ -46,9 +48,6 @@ type Updater struct {
 	DownloadBaseURL string
 	// Platform names the release build to fetch, such as "darwin_arm64".
 	Platform string
-	// RunCommand runs an external command, so the brew path can be tested
-	// without a Homebrew installation.
-	RunCommand func(ctx context.Context, name string, args ...string) error
 }
 
 // Apply updates the running binary to the latest release.
@@ -87,7 +86,7 @@ func (updater Updater) Apply(ctx context.Context) error {
 func (updater Updater) latestVersion(ctx context.Context) (string, error) {
 	// Deliberately skips the notice cache. A 12-hour-old answer is fine for a
 	// passive hint, but someone asking to update wants today's release.
-	entry, err := updater.checker().fetchLatest(ctx)
+	entry, err := updater.Checker.fetchLatest(ctx, updateClient)
 	if err != nil {
 		return "", err
 	}
@@ -154,7 +153,7 @@ func (updater Updater) download(ctx context.Context, url string) ([]byte, error)
 	}
 	request.Header.Set("User-Agent", "local-ci-runner/"+updater.Checker.currentVersion())
 
-	response, err := updater.checker().httpClient().Do(request)
+	response, err := updateClient.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", url, err)
 	}
@@ -269,9 +268,6 @@ func describeWriteError(err error, path string) error {
 }
 
 func (updater Updater) runCommand(ctx context.Context, name string, args ...string) error {
-	if updater.RunCommand != nil {
-		return updater.RunCommand(ctx, name, args...)
-	}
 	command := exec.CommandContext(ctx, name, args...)
 	// brew reports progress on both streams; the operator should see it.
 	command.Stdout = updater.stdout()
@@ -279,21 +275,11 @@ func (updater Updater) runCommand(ctx context.Context, name string, args ...stri
 	return command.Run()
 }
 
-// checker returns the release checker with a timeout suited to downloading,
-// unless a caller supplied its own client.
-func (updater Updater) checker() Checker {
-	checker := updater.Checker
-	if checker.HTTPClient == nil {
-		checker.HTTPClient = &http.Client{Timeout: updateTimeout}
-	}
-	return checker
-}
-
 func (updater Updater) downloadBaseURL() string {
 	if strings.TrimSpace(updater.DownloadBaseURL) != "" {
 		return updater.DownloadBaseURL
 	}
-	return fmt.Sprintf("https://github.com/%s/releases/download", updater.Checker.repo())
+	return fmt.Sprintf("https://github.com/%s/releases/download", DefaultRepo)
 }
 
 // platform matches the os_arch suffix the release workflow builds archives for.

@@ -31,3 +31,17 @@ func TestReadFileIgnoresPartialTrailingLine(t *testing.T) {
 		t.Fatalf("event time = %v, want %v", got, want)
 	}
 }
+
+// Only the final line can be torn; a corrupt complete line means the history is unreliable.
+func TestReadFileRejectsMalformedCompleteLine(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	content := "{\"sequence\":1,\"run_id\":\"run-1\",\"type\":\"run.started\"}\nnot-json\n{\"sequence\":2,\"run_id\":\"run-1\",\"type\":\"run.finished\"}\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(path); err == nil {
+		t.Fatal("ReadFile accepted a malformed complete line")
+	}
+}

@@ -10,26 +10,41 @@ import (
 	"testing"
 )
 
+// Fixtures and Discover both run git, so neither may see the developer's global config
+// (commit signing, hooks, quotePath, default branch).
+func TestMain(m *testing.M) {
+	os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	os.Exit(m.Run())
+}
+
 func TestParseGitHubSlug(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		name string
-		url  string
-		want string
+	for _, test := range []struct {
+		url       string
+		want      string
+		wantError string
 	}{
-		{name: "ssh scp", url: "git@github.com:owner/repo.git", want: "owner/repo"},
-		{name: "https", url: "https://github.com/owner/repo.git", want: "owner/repo"},
-		{name: "ssh url", url: "ssh://git@github.com/owner/repo.git", want: "owner/repo"},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			got, err := ParseGitHubSlug(testCase.url)
-			if err != nil {
-				t.Fatalf("ParseGitHubSlug() error = %v", err)
+		{url: "git@github.com:owner/repo.git", want: "owner/repo"},
+		{url: "https://github.com/owner/repo.git", want: "owner/repo"},
+		{url: "ssh://git@github.com/owner/repo.git", want: "owner/repo"},
+		// Statuses always go to github.com, so another host must never yield a slug there.
+		{url: "https://gitlab.com/owner/repo.git", wantError: "not on github.com"},
+		{url: "ssh://git@github.example.com/owner/repo.git", wantError: "not on github.com"},
+		{url: "git@gitlab.com:owner/repo.git", wantError: "not a supported GitHub remote"},
+		{url: "https://github.com/owner", wantError: "owner/repo"},
+	} {
+		t.Run(test.url, func(t *testing.T) {
+			got, err := ParseGitHubSlug(test.url)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("slug = %q, error = %v, want %q", got, err, test.wantError)
+				}
+				return
 			}
-			if got != testCase.want {
-				t.Fatalf("ParseGitHubSlug() = %q, want %q", got, testCase.want)
+			if err != nil || got != test.want {
+				t.Fatalf("slug = %q, error = %v, want %q", got, err, test.want)
 			}
 		})
 	}
@@ -56,26 +71,15 @@ func TestDiscoverRejectsRepoWithoutCommits(t *testing.T) {
 	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
 
 	_, err := Discover(t.Context(), repoRoot)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if got, want := err.Error(), "git repo has no commits"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
+	if err == nil || !strings.Contains(err.Error(), "git repo has no commits") {
+		t.Fatalf("error = %v, want no commits", err)
 	}
 }
 
 func TestDiscover(t *testing.T) {
 	t.Parallel()
 
-	repoRoot := t.TempDir()
-	runGit(t, repoRoot, "init")
-	runGit(t, repoRoot, "config", "user.email", "local-ci@example.com")
-	runGit(t, repoRoot, "config", "user.name", "Local CI")
-	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# repo\n"))
-	runGit(t, repoRoot, "add", "README.md")
-	runGit(t, repoRoot, "commit", "-m", "init")
-	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
-
+	repoRoot := newCommittedRepo(t)
 	headSHA := gitOutputForTest(t, repoRoot, "rev-parse", "HEAD")
 	canonicalRoot, err := filepath.EvalSymlinks(repoRoot)
 	if err != nil {
@@ -85,75 +89,63 @@ func TestDiscover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Discover() error = %v", err)
 	}
-	if got, want := info.Root, canonicalRoot; got != want {
-		t.Fatalf("Root = %q, want %q", got, want)
+	// Resume and publish compare the canonical root, e.g. /private/var versus /var on macOS.
+	if info.Root != canonicalRoot || info.RepoSlug != "owner/repo" || info.HeadSHA != headSHA {
+		t.Fatalf("info = %+v", info)
 	}
-	if got, want := info.RepoSlug, "owner/repo"; got != want {
-		t.Fatalf("RepoSlug = %q, want %q", got, want)
-	}
-	if got, want := info.HeadSHA, headSHA; got != want {
-		t.Fatalf("HeadSHA = %q, want %q", got, want)
-	}
-	if info.DirtyWorktree {
-		t.Fatal("expected clean worktree")
-	}
-	if info.HeadTreeHash == "" || info.WorktreeTreeHash == "" {
-		t.Fatalf("expected tree hashes, got %+v", info)
-	}
-	if got, want := info.HeadTreeHash, info.WorktreeTreeHash; got != want {
-		t.Fatalf("HeadTreeHash = %q, want worktree %q", got, want)
+	if info.DirtyWorktree || info.HeadTreeHash == "" || info.HeadTreeHash != info.WorktreeTreeHash {
+		t.Fatalf("clean worktree reported as %+v", info)
 	}
 }
 
-func TestDiscoverMarksDirtyWorktree(t *testing.T) {
+// The snapshot is what publish later compares with HEAD, so every kind of local change must
+// change it, including files Git does not track yet.
+func TestDiscoverSnapshotsLocalChanges(t *testing.T) {
 	t.Parallel()
 
-	repoRoot := t.TempDir()
-	runGit(t, repoRoot, "init")
-	runGit(t, repoRoot, "config", "user.email", "local-ci@example.com")
-	runGit(t, repoRoot, "config", "user.name", "Local CI")
-	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# repo\n"))
-	runGit(t, repoRoot, "add", "README.md")
-	runGit(t, repoRoot, "commit", "-m", "init")
-	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
-	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# dirty\n"))
+	for _, test := range []struct {
+		name       string
+		change     func(repoRoot string)
+		wantPath   string
+		wantStatus WorktreeFileStatus
+	}{
+		{
+			name:       "modified tracked file",
+			change:     func(repoRoot string) { writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# dirty\n")) },
+			wantPath:   "README.md",
+			wantStatus: WorktreeFileModified,
+		},
+		{
+			name:       "untracked file",
+			change:     func(repoRoot string) { writeFile(t, filepath.Join(repoRoot, "new.go"), []byte("package main\n")) },
+			wantPath:   "new.go",
+			wantStatus: WorktreeFileAdded,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			repoRoot := newCommittedRepo(t)
+			test.change(repoRoot)
 
-	info, err := Discover(t.Context(), repoRoot)
-	if err != nil {
-		t.Fatalf("Discover() error = %v", err)
-	}
-	if !info.DirtyWorktree {
-		t.Fatal("expected dirty worktree")
-	}
-	if info.HeadTreeHash == info.WorktreeTreeHash {
-		t.Fatalf("expected different tree hashes, got %q", info.HeadTreeHash)
-	}
-	if len(info.DirtyFiles) != 1 {
-		t.Fatalf("dirty file count = %d, want 1", len(info.DirtyFiles))
-	}
-	if got, want := info.DirtyFiles[0].Path, "README.md"; got != want {
-		t.Fatalf("dirty file path = %q, want %q", got, want)
-	}
-	if got, want := info.DirtyFiles[0].Status, WorktreeFileModified; got != want {
-		t.Fatalf("dirty file status = %q, want %q", got, want)
-	}
-	if info.DirtyFiles[0].BlobHash == "" {
-		t.Fatal("expected dirty file blob hash")
+			info, err := Discover(t.Context(), repoRoot)
+			if err != nil {
+				t.Fatalf("Discover() error = %v", err)
+			}
+			if !info.DirtyWorktree || info.HeadTreeHash == info.WorktreeTreeHash {
+				t.Fatalf("change left the snapshot equal to HEAD: %+v", info)
+			}
+			if len(info.DirtyFiles) != 1 || info.DirtyFiles[0].Path != test.wantPath || info.DirtyFiles[0].Status != test.wantStatus || info.DirtyFiles[0].BlobHash == "" {
+				t.Fatalf("dirty files = %+v", info.DirtyFiles)
+			}
+		})
 	}
 }
 
+// Consumer repos need not gitignore runner artifacts: the runner filters its own directory.
 func TestDiscoverIgnoresLocalCIArtifacts(t *testing.T) {
 	t.Parallel()
 
-	repoRoot := t.TempDir()
-	runGit(t, repoRoot, "init")
-	runGit(t, repoRoot, "config", "user.email", "local-ci@example.com")
-	runGit(t, repoRoot, "config", "user.name", "Local CI")
-	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# repo\n"))
-	writeFile(t, filepath.Join(repoRoot, ".gitignore"), []byte(".local-ci/\n"))
-	runGit(t, repoRoot, "add", "README.md", ".gitignore")
-	runGit(t, repoRoot, "commit", "-m", "init")
-	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
+	repoRoot := newCommittedRepo(t)
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".local-ci", "runs", "run-1"), 0o755); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
@@ -164,19 +156,28 @@ func TestDiscoverIgnoresLocalCIArtifacts(t *testing.T) {
 		t.Fatalf("Discover() error = %v", err)
 	}
 	if info.DirtyWorktree {
-		t.Fatal("expected .local-ci artifacts to be ignored")
+		t.Fatalf("runner artifacts dirtied the snapshot: %+v", info.DirtyFiles)
 	}
+}
+
+// newCommittedRepo returns a repository with one commit and a github.com origin.
+func newCommittedRepo(t *testing.T) string {
+	t.Helper()
+
+	repoRoot := t.TempDir()
+	runGit(t, repoRoot, "init")
+	runGit(t, repoRoot, "config", "user.email", "local-ci@example.com")
+	runGit(t, repoRoot, "config", "user.name", "Local CI")
+	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("# repo\n"))
+	runGit(t, repoRoot, "add", "README.md")
+	runGit(t, repoRoot, "commit", "-m", "init")
+	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")
+	return repoRoot
 }
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
-
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %s: %v", args, string(output), err)
-	}
+	gitOutputForTest(t, dir, args...)
 }
 
 func gitOutputForTest(t *testing.T, dir string, args ...string) string {
