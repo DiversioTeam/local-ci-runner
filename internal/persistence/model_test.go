@@ -2,54 +2,36 @@ package persistence
 
 import (
 	"encoding/json"
-	"strings"
+	"maps"
+	"slices"
 	"testing"
-	"time"
 )
 
-func TestMetaOmitsUnsetOptionalFields(t *testing.T) {
+// Unset optional fields are absent, not null or zero (MANUAL §8). Comparing the exact key
+// set keeps a new field from silently defaulting into every record.
+func TestUnsetOptionalFieldsAreOmitted(t *testing.T) {
 	t.Parallel()
 
-	meta := Meta{
-		RunID:      "run-123",
-		RepoRoot:   "/tmp/repo",
-		RepoSlug:   "owner/repo",
-		HeadSHA:    "abc123",
-		ConfigPath: ".local-ci.toml",
-		ConfigHash: "cfg",
-		PlanHash:   "plan",
-		CreatedAt:  time.Date(2026, 6, 27, 12, 0, 0, 0, time.UTC),
-	}
-
-	payload, err := json.Marshal(meta)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	text := string(payload)
-
-	for _, field := range []string{"started_at", "finished_at", "runner_pid", "head_tree_hash", "worktree_tree_hash", "dirty_worktree", "dirty_files", "github_posting_suppressed"} {
-		if strings.Contains(text, field) {
-			t.Fatalf("unexpected optional field %q in %s", field, text)
-		}
-	}
-}
-
-func TestStepStatusOmitsUnsetOptionalFields(t *testing.T) {
-	t.Parallel()
-
-	status := StepStatus{
-		StepID: "lint",
-		State:  "success",
-		Index:  0,
-	}
-
-	payload, err := json.Marshal(status)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	text := string(payload)
-
-	if strings.Contains(text, "started_at") || strings.Contains(text, "finished_at") || strings.Contains(text, "exit_code") {
-		t.Fatalf("unexpected optional fields in %s", text)
+	for _, test := range []struct {
+		name   string
+		record any
+		want   []string
+	}{
+		{name: "meta", record: Meta{}, want: []string{"config_hash", "config_path", "created_at", "head_sha", "plan_hash", "repo_root", "repo_slug", "run_id"}},
+		{name: "step status", record: StepStatus{}, want: []string{"index", "state", "step_id"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := json.Marshal(test.record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(payload, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if got := slices.Sorted(maps.Keys(fields)); !slices.Equal(got, test.want) {
+				t.Fatalf("keys = %v, want %v", got, test.want)
+			}
+		})
 	}
 }

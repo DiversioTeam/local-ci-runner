@@ -42,7 +42,7 @@ type ResolvedPlan struct {
 	Steps []Step            `json:"steps"`
 }
 
-func (f *File) ApplyDefaults() {
+func (f *File) applyDefaults() {
 	if f.MaxParallel == 0 {
 		f.MaxParallel = 1
 	}
@@ -61,6 +61,11 @@ func (f File) StaticPlan() ResolvedPlan {
 	plan := ResolvedPlan{Steps: cloneSteps(f.Steps)}
 	plan.ApplyDefaults()
 	return plan
+}
+
+// Clone returns a deep copy, so callers can apply defaults without touching the original.
+func (p ResolvedPlan) Clone() ResolvedPlan {
+	return ResolvedPlan{Env: cloneStringMap(p.Env), Steps: cloneSteps(p.Steps)}
 }
 
 func (p *ResolvedPlan) ApplyDefaults() {

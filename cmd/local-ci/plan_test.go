@@ -30,7 +30,7 @@ needs = ["first"]
 `))
 	var stdout, stderr bytes.Buffer
 	command := newCLI(&stdout, &stderr, root)
-	if err := command.run([]string{"plan", "--json"}); err != nil {
+	if err := command.runWithContext(t.Context(), nil, []string{"plan", "--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var planned planJSON
@@ -47,7 +47,7 @@ needs = ["first"]
 		t.Fatal("plan executed a step")
 	}
 	stdout.Reset()
-	if err := command.run([]string{"run", "--json", "--no-github"}); err != nil {
+	if err := command.runWithContext(t.Context(), nil, []string{"run", "--json", "--no-github"}); err != nil {
 		t.Fatal(err)
 	}
 	var completed showJSON
@@ -61,7 +61,7 @@ needs = ["first"]
 		t.Fatalf("run did not execute the check: %v", err)
 	}
 	stdout.Reset()
-	if err := command.run([]string{"resume", "--max-parallel", "1", completed.RunID, "--from-step=first", "--json"}); err != nil {
+	if err := command.runWithContext(t.Context(), nil, []string{"resume", "--max-parallel", "1", completed.RunID, "--from-step=first", "--json"}); err != nil {
 		t.Fatal(err)
 	}
 	var resumed showJSON
@@ -107,7 +107,7 @@ func TestPlannerCannotChangeTheCapturedSnapshotOrConfiguration(t *testing.T) {
 				if commandName == "run" {
 					args = append(args, "--no-github")
 				}
-				err := newCLI(&stdout, &stderr, root).run(args)
+				err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, args)
 				if testCase.wantError == "" {
 					if err != nil {
 						t.Fatalf("%s refused an ignored planner output: %v", commandName, err)
@@ -140,7 +140,7 @@ func TestFailedRunStillEmitsInspectableJSON(t *testing.T) {
 	root := newGitRepo(t)
 	writeFile(t, filepath.Join(root, config.DefaultPath), []byte("version = 1\n[[steps]]\nid = 'fail'\ncommand = ['sh', '-c', 'echo noise; exit 7']\n"))
 	var stdout, stderr bytes.Buffer
-	err := newCLI(&stdout, &stderr, root).run([]string{"run", "--json", "--no-github"})
+	err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"run", "--json", "--no-github"})
 	if !errors.Is(err, errRunFailed) {
 		t.Fatalf("error = %v", err)
 	}

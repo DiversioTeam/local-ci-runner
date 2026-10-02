@@ -25,8 +25,9 @@ consumer-repo-specific workflow logic.
 4. `docs/architecture.md` — write path, read path, persistence, resume safety
 5. `docs/inspection.md` — operator mental model for `runs`, `show`, `logs`, `publish`
 6. `docs/quality/gates.md` — local commands, release CI, and common failures
-7. `docs/runbooks/development.md` — everyday dev loop and release-helper workflow
-8. `cmd/local-ci/MANUAL.md` — full CLI/help surface, when you need it
+7. `docs/quality/testing.md` — read before adding or changing a test
+8. `docs/runbooks/development.md` — everyday dev loop and release-helper workflow
+9. `cmd/local-ci/MANUAL.md` — full CLI/help surface, when you need it
 
 ## Repo shape
 
@@ -72,6 +73,7 @@ local-ci run
 - Resume/publish must fail closed for repo identity, SHA, config hash, plan hash, and snapshot mismatches.
 - Third-party auth env vars exposed by this tool must use `LOCAL_CI_` prefixes.
 - Preserve the clean split between generic runner behavior and repo-owned planner behavior.
+- Test each contract once, at its owner, through a real boundary; never add a production seam only for tests (`docs/quality/testing.md`).
 
 ## Release notes
 

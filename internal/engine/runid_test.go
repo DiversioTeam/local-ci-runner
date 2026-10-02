@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -22,28 +23,23 @@ func TestNewRunID(t *testing.T) {
 	}
 }
 
-func TestNewRunIDRejectsBadReader(t *testing.T) {
+func TestNewRunIDRejectsUnusableEntropy(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 27, 12, 34, 56, 0, time.UTC)
-	_, err := NewRunID(now, bytes.NewReader([]byte{0xde, 0xad}))
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "read random suffix") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNewRunIDRejectsNilReader(t *testing.T) {
-	t.Parallel()
-
-	now := time.Date(2026, 6, 27, 12, 34, 56, 0, time.UTC)
-	_, err := NewRunID(now, nil)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "nil reader") {
-		t.Fatalf("error = %v", err)
+	for _, test := range []struct {
+		name      string
+		reader    io.Reader
+		wantError string
+	}{
+		// A short read must fail rather than produce a zero-padded suffix.
+		{name: "short read", reader: bytes.NewReader([]byte{0xde, 0xad}), wantError: "read random suffix"},
+		{name: "nil reader", wantError: "nil reader"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := NewRunID(now, test.reader); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }

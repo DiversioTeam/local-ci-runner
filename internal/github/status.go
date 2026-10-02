@@ -18,5 +18,4 @@ type Status struct {
 	Context     string `json:"context"`
 	State       State  `json:"state"`
 	Description string `json:"description,omitempty"`
-	TargetURL   string `json:"target_url,omitempty"`
 }

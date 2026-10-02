@@ -45,7 +45,7 @@ func PrepareRun(store persistence.Store, opts PrepareOptions) (RunRecord, error)
 	if err := opts.Identity.Validate(); err != nil {
 		return RunRecord{}, err
 	}
-	githubConfig := normalizeGitHubConfig(opts.GitHub)
+	githubConfig := opts.GitHub
 	if opts.MaxParallel < 0 {
 		return RunRecord{}, fmt.Errorf("max_parallel must be a positive integer")
 	}
@@ -53,10 +53,7 @@ func PrepareRun(store persistence.Store, opts PrepareOptions) (RunRecord, error)
 		opts.MaxParallel = 1
 	}
 
-	plan := config.ResolvedPlan{
-		Env:   cloneStringMap(opts.Plan.Env),
-		Steps: cloneSteps(opts.Plan.Steps),
-	}
+	plan := opts.Plan.Clone()
 	plan.ApplyDefaults()
 	if err := plan.Validate(); err != nil {
 		return RunRecord{}, fmt.Errorf("validate plan: %w", err)
@@ -225,10 +222,7 @@ func MarkStaleFromStep(plan config.ResolvedPlan, statuses []persistence.StepStat
 		return nil, fmt.Errorf("from step is required")
 	}
 
-	copyPlan := config.ResolvedPlan{
-		Env:   cloneStringMap(plan.Env),
-		Steps: cloneSteps(plan.Steps),
-	}
+	copyPlan := plan.Clone()
 	copyPlan.ApplyDefaults()
 	if err := copyPlan.Validate(); err != nil {
 		return nil, fmt.Errorf("validate plan: %w", err)
@@ -239,42 +233,19 @@ func MarkStaleFromStep(plan config.ResolvedPlan, statuses []persistence.StepStat
 		return nil, err
 	}
 
-	allowedStepIDs := make(map[string]struct{}, len(copyPlan.Steps))
-	for _, step := range copyPlan.Steps {
-		allowedStepIDs[step.ID] = struct{}{}
-	}
-
-	statusByID := make(map[string]persistence.StepStatus, len(statuses))
-	for _, status := range statuses {
-		if _, allowed := allowedStepIDs[status.StepID]; !allowed {
-			return nil, fmt.Errorf("unknown step status %q", status.StepID)
+	// Callers pass statuses already validated one-to-one against the plan (validateStoredStepStatuses).
+	result := make([]persistence.StepStatus, len(statuses))
+	for index, status := range statuses {
+		result[index] = cloneStepStatus(status)
+		if _, isAffected := affected[status.StepID]; isAffected {
+			result[index].State = string(StepStateStale)
 		}
-		if _, exists := statusByID[status.StepID]; exists {
-			return nil, fmt.Errorf("duplicate step status %q", status.StepID)
-		}
-		statusByID[status.StepID] = cloneStepStatus(status)
-	}
-
-	result := make([]persistence.StepStatus, 0, len(copyPlan.Steps))
-	for index, step := range copyPlan.Steps {
-		expected := expectedStepStatus(step, index)
-		status, exists := statusByID[step.ID]
-		if !exists {
-			status = expected
-		} else if err := validateStepStatusAgainstExpected(status, expected); err != nil {
-			return nil, err
-		}
-		if _, isAffected := affected[step.ID]; isAffected {
-			status.State = string(StepStateStale)
-		}
-		result = append(result, status)
 	}
 
 	return result, nil
 }
 
 func validatePrepareInputs(store persistence.Store, identity RunIdentity, plan config.ResolvedPlan, githubConfig config.GitHub) error {
-	githubConfig = normalizeGitHubConfig(githubConfig)
 	storeRoot, err := filepath.Abs(store.RepoRoot)
 	if err != nil {
 		return fmt.Errorf("resolve store root: %w", err)
@@ -303,13 +274,6 @@ func validatePrepareInputs(store persistence.Store, identity RunIdentity, plan c
 	}
 
 	return nil
-}
-
-func normalizeGitHubConfig(githubConfig config.GitHub) config.GitHub {
-	if githubConfig.AggregateContext == "" {
-		githubConfig.AggregateContext = config.DefaultAggregateContext
-	}
-	return githubConfig
 }
 
 func validateStoredStepStatuses(plan config.ResolvedPlan, statuses []persistence.StepStatus) error {

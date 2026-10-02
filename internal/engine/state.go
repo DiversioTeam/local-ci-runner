@@ -18,15 +18,6 @@ const (
 	StepStateStale       StepState = "stale"
 )
 
-func (s StepState) Terminal() bool {
-	switch s {
-	case StepStateSuccess, StepStateFailure, StepStateInterrupted, StepStateSkipped, StepStateBlocked, StepStateStale:
-		return true
-	default:
-		return false
-	}
-}
-
 // InterruptError carries the OS signal that canceled a run.
 type InterruptError struct {
 	Signal os.Signal

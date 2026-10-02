@@ -13,10 +13,9 @@ type Reporter interface {
 	PostStatus(ctx context.Context, target Target, status Status) error
 }
 
+// CLIReporter posts commit statuses through the gh CLI found on PATH.
 type CLIReporter struct {
-	Command string
-	Token   string
-	Env     []string
+	Token string
 }
 
 func (reporter CLIReporter) PostStatus(ctx context.Context, target Target, status Status) error {
@@ -58,11 +57,6 @@ func (reporter CLIReporter) commandSpec(target Target, status Status) (commandSp
 		return commandSpec{}, err
 	}
 
-	commandName := reporter.Command
-	if commandName == "" {
-		commandName = "gh"
-	}
-
 	args := []string{
 		"api",
 		fmt.Sprintf("repos/%s/statuses/%s", target.Repo, target.SHA),
@@ -73,21 +67,13 @@ func (reporter CLIReporter) commandSpec(target Target, status Status) (commandSp
 	if status.Description != "" {
 		args = append(args, "-f", "description="+status.Description)
 	}
-	if status.TargetURL != "" {
-		args = append(args, "-f", "target_url="+status.TargetURL)
-	}
 
 	// Repository discovery accepts github.com only; inherited GH_HOST must not retarget receipts.
 	args = append(args, "--hostname", "github.com")
-	baseEnv := reporter.Env
-	if baseEnv == nil {
-		baseEnv = os.Environ()
-	}
-
 	return commandSpec{
-		name: commandName,
+		name: "gh",
 		args: args,
-		env:  CLIEnv(baseEnv, reporter.Token),
+		env:  cliEnv(os.Environ(), reporter.Token),
 	}, nil
 }
 

@@ -25,7 +25,7 @@ type planJSON struct {
 }
 
 func (c *cli) planCommand(commandContext context.Context, args []string) error {
-	opts, err := parseExecutionArgs(args, false)
+	opts, _, err := parseExecutionArgs(args, false)
 	if err != nil {
 		return err
 	}

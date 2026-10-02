@@ -24,16 +24,15 @@ go run ./cmd/local-ci manual
 ## Why these gates exist
 
 - `gofmt` keeps the Go tree mechanically clean.
-- `go test ./...` is the main correctness gate. Publication tests cover
-  exact targets, durable intent before posting, persistence failures, retries,
-  unknown reporting errors, and refusal to append to torn event logs.
-- Binary-only documentation tests build an executable with an injected version,
-  then run help/manual/version outside a repo without Git on PATH.
-  They verify embedded schema documentation against the compiled contract.
-  CLI tests verify existing runner-log JSON exposes receipt fields without
-  mutating inspected artifacts.
-- `go test -race ./...` covers worker limits, ready-step ordering, skipped dependencies, sibling failures, shared GitHub contexts, timeout/interruption, resume/rerun, and isolated logs. Worker limits and dependency order are read back from the persisted event sequence, not from timing. Fatal persistence errors are proven to cancel and join every worker. The log write-failure row needs `/dev/full`, so it runs on Linux, including release CI, and skips on macOS.
-- CLI tests verify plan preview creates no run/executes no steps, rejects planner changes to HEAD/source/config, execution JSON never mixes child output, and unsuccessful results remain inspectable. Reporting tests cover aggregate-context collisions, fatal receipt writes during cancellation, and immediate failure-log progress before remote posts. Compiled-binary tests cover discovery without source or Git.
+- `go test ./...` is the main correctness gate. `go test -race ./...` also
+  checks the single-writer scheduler and every worker handoff.
+- Binary-only tests build an executable with an injected version and run it
+  outside a repo without Git on PATH, so help, the manual, version and exit
+  status are checked as operators get them.
+- The log write-failure row needs `/dev/full`, so it runs on Linux (release CI)
+  and skips on macOS.
+- Which test owns which contract, and how to add one, is in
+  [`testing.md`](./testing.md).
 - `go vet ./...` catches suspicious Go patterns.
 
 ## Release CI

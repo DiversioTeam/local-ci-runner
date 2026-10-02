@@ -131,10 +131,7 @@ func HashFile(path string) (string, error) {
 }
 
 func HashPlan(plan config.ResolvedPlan) (string, error) {
-	copyPlan := config.ResolvedPlan{
-		Env:   cloneStringMap(plan.Env),
-		Steps: cloneSteps(plan.Steps),
-	}
+	copyPlan := plan.Clone()
 	copyPlan.ApplyDefaults()
 	if err := copyPlan.Validate(); err != nil {
 		return "", fmt.Errorf("validate plan for hashing: %w", err)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,27 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/gitrepo"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
+
+// TestMain keeps tests away from the developer's machine: git ignores global config, and a
+// gh that always fails shadows the real one, so a broken guard can never post a real status.
+func TestMain(m *testing.M) {
+	os.Exit(runIsolated(m))
+}
+
+func runIsolated(m *testing.M) int {
+	fakeBin, err := os.MkdirTemp("", "local-ci-fake-gh-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(fakeBin)
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte("#!/bin/sh\necho 'fake gh: tests must not contact GitHub' >&2\nexit 1\n"), 0o755); err != nil {
+		panic(err)
+	}
+	os.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	return m.Run()
+}
 
 type cliFixture struct {
 	root        string
@@ -35,28 +57,29 @@ func TestHelpSurfaces(t *testing.T) {
 		want  string
 		flags []string
 	}{
-		{name: "top level", args: nil, want: "local-ci runs repo-owned verification steps"},
+		{name: "top level", args: nil, want: "Main commands:"},
 		{name: "top level flag", args: []string{"--help"}, want: "Main commands:"},
 		{name: "run", args: []string{"run", "--help"}, want: "Usage:\n  local-ci run", flags: []string{"--json", "--max-parallel", "--no-github"}},
 		{name: "resume", args: []string{"resume", "--help"}, want: "Usage:\n  local-ci resume", flags: []string{"--json", "--max-parallel", "--from-step"}},
 		{name: "plan", args: []string{"plan", "--help"}, want: "Usage:\n  local-ci plan", flags: []string{"--json", "--max-parallel"}},
 		{name: "plan alias", args: []string{"help", "plan"}, want: "Usage:\n  local-ci plan"},
 		{name: "runs", args: []string{"runs", "--help"}, want: "Usage:\n  local-ci runs"},
-		{name: "show", args: []string{"show", "--help"}, want: "Works for both active and finished runs."},
+		{name: "show", args: []string{"show", "--help"}, want: "Usage:\n  local-ci show"},
 		{name: "publish", args: []string{"publish", "--help"}, want: "Usage:\n  local-ci publish <run-id>"},
 		{name: "version", args: []string{"version", "--help"}, want: "Usage:\n  local-ci version"},
-		{name: "logs", args: []string{"logs", "--help"}, want: "Defaults:"},
+		{name: "logs", args: []string{"logs", "--help"}, want: "Usage:\n  local-ci logs"},
+		{name: "update", args: []string{"update", "--help"}, want: "Usage:\n  local-ci update"},
 		{name: "help alias", args: []string{"help", "logs"}, want: "--step <id>"},
-		{name: "manual", args: []string{"manual"}, want: "## 11. Safety rules and failure modes"},
-		{name: "manual help", args: []string{"manual", "--help"}, want: "## 9. Active-run semantics"},
-		{name: "help all", args: []string{"help", "all"}, want: "## 9. Active-run semantics"},
+		{name: "manual", args: []string{"manual"}, want: manualText},
+		{name: "manual help", args: []string{"manual", "--help"}, want: manualText},
+		{name: "help all", args: []string{"help", "all"}, want: manualText},
 	}
 
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			stdout := &bytes.Buffer{}
 			stderr := &bytes.Buffer{}
-			if err := newCLI(stdout, stderr, t.TempDir()).run(testCase.args); err != nil {
+			if err := newCLI(stdout, stderr, t.TempDir()).runWithContext(t.Context(), nil, testCase.args); err != nil {
 				t.Fatalf("run() error = %v", err)
 			}
 			if got := stdout.String(); !strings.Contains(got, testCase.want) {
@@ -68,18 +91,6 @@ func TestHelpSurfaces(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestManualRejectsUnexpectedArgs(t *testing.T) {
-	t.Parallel()
-
-	err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, t.TempDir()).run([]string{"manual", "foo", "--help"})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if got, want := err.Error(), "manual accepts no arguments"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
 	}
 }
 
@@ -100,7 +111,7 @@ func TestParseExecutionArgs(t *testing.T) {
 		{args: []string{"--from-step="}, wantError: "--from-step"},
 	} {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
-			got, err := parseExecutionArgs(test.args, false)
+			got, _, err := parseExecutionArgs(test.args, false)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
 					t.Fatalf("error = %v, want %q", err, test.wantError)
@@ -114,19 +125,27 @@ func TestParseExecutionArgs(t *testing.T) {
 	}
 }
 
-func TestExecutionCommandsRejectFlagsTheyCannotHonor(t *testing.T) {
+func TestUsageErrors(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
 		args      []string
 		wantError string
 	}{
+		{args: []string{"bogus"}, wantError: "unknown command"},
+		{args: []string{"manual", "foo", "--help"}, wantError: "manual accepts no arguments"},
+		{args: []string{"logs", "run-1", "--runner", "--planner"}, wantError: "choose exactly one log source"},
+		{args: []string{"logs", "run-1", "--step", "--stderr"}, wantError: "--step requires a value"},
 		{args: []string{"run", "--from-step", "lint"}, wantError: "supported only by resume"},
 		{args: []string{"plan", "--no-github"}, wantError: "plan accepts"},
 		{args: []string{"plan", "--from-step", "lint"}, wantError: "plan accepts"},
+		// A flag's value must never be mistaken for the run id.
+		{args: []string{"resume", "--max-parallel", "2"}, wantError: "resume requires exactly one run id"},
+		{args: []string{"resume", "run-1", "run-2"}, wantError: "resume requires exactly one run id"},
 	} {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
-			err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, t.TempDir()).run(test.args)
+			t.Parallel()
+			err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, t.TempDir()).runWithContext(t.Context(), nil, test.args)
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("error = %v, want %q", err, test.wantError)
 			}
@@ -160,94 +179,84 @@ func TestSuppressedGitHubPostingReason(t *testing.T) {
 	}
 }
 
-func TestValidatePublishableRunRejectsPlanHashChange(t *testing.T) {
+func TestPublishRefusesRunForChangedCheckout(t *testing.T) {
 	t.Parallel()
 
-	repo := gitrepo.Info{
-		Root:             "/repo",
-		RepoSlug:         "owner/repo",
-		HeadSHA:          "def456",
-		HeadTreeHash:     "tree-1",
-		WorktreeTreeHash: "tree-1",
-		DirtyWorktree:    false,
+	root := newGitRepo(t)
+	writeFile(t, filepath.Join(root, config.DefaultPath), []byte("version = 1\n[github]\nenabled = true\n[[steps]]\nid = 'check'\ncommand = ['sh', '-c', 'exit 0']\n"))
+	runGit(t, root, "add", config.DefaultPath)
+	runGit(t, root, "commit", "-m", "config")
+	var stdout bytes.Buffer
+	if err := newCLI(&stdout, &bytes.Buffer{}, root).runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+		t.Fatal(err)
 	}
-	identity := engine.RunIdentity{
-		RepoRoot:         "/repo",
-		RepoSlug:         "owner/repo",
-		HeadSHA:          "def456",
-		ConfigPath:       "/repo/.local-ci.toml",
-		ConfigHash:       "cfg-1",
-		PlanHash:         "plan-2",
-		WorktreeTreeHash: "tree-1",
+	var completed showJSON
+	if err := json.Unmarshal(stdout.Bytes(), &completed); err != nil {
+		t.Fatal(err)
 	}
-	run := engine.RunRecord{
-		RunID: "run-1",
-		Meta: persistence.Meta{
-			RepoRoot:                "/repo",
-			RepoSlug:                "owner/repo",
-			ConfigPath:              "/repo/.local-ci.toml",
-			ConfigHash:              "cfg-1",
-			PlanHash:                "plan-1",
-			GitHubEnabled:           true,
-			GitHubPostingSuppressed: "dirty_worktree",
-			WorktreeTreeHash:        "tree-1",
-			StartedAt:               timePtr(time.Date(2026, 6, 27, 15, 0, 0, 0, time.UTC)),
-			FinishedAt:              timePtr(time.Date(2026, 6, 27, 15, 1, 0, 0, time.UTC)),
-		},
-		Summary: persistence.Summary{Status: string(engine.StepStateSuccess)},
-	}
-
-	err := validatePublishableRun(repo, identity, run)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if got, want := err.Error(), "plan hash changed"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
+	// A change after the run means the stored result no longer describes this checkout.
+	writeFile(t, filepath.Join(root, "README.md"), []byte("changed after the run\n"))
+	err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, root).runWithContext(t.Context(), nil, []string{"publish", completed.RunID})
+	if err == nil || !strings.Contains(err.Error(), "current worktree is dirty") {
+		t.Fatalf("publish error = %v, want the dirty-worktree refusal", err)
 	}
 }
 
-func TestValidatePublishableRunRejectsAlreadyPostedRun(t *testing.T) {
+func TestValidatePublishableRunRefusesChangedIdentityOrSnapshot(t *testing.T) {
 	t.Parallel()
 
-	repo := gitrepo.Info{
-		Root:             "/repo",
-		RepoSlug:         "owner/repo",
-		HeadSHA:          "def456",
-		HeadTreeHash:     "tree-1",
-		WorktreeTreeHash: "tree-1",
-		DirtyWorktree:    false,
-	}
-	identity := engine.RunIdentity{
-		RepoRoot:         "/repo",
-		RepoSlug:         "owner/repo",
-		HeadSHA:          "def456",
-		ConfigPath:       "/repo/.local-ci.toml",
-		ConfigHash:       "cfg-1",
-		PlanHash:         "plan-1",
-		WorktreeTreeHash: "tree-1",
-	}
-	run := engine.RunRecord{
-		RunID: "run-1",
-		Meta: persistence.Meta{
-			RepoRoot:         "/repo",
-			RepoSlug:         "owner/repo",
-			ConfigPath:       "/repo/.local-ci.toml",
-			ConfigHash:       "cfg-1",
-			PlanHash:         "plan-1",
-			GitHubEnabled:    true,
-			WorktreeTreeHash: "tree-1",
-			StartedAt:        timePtr(time.Date(2026, 6, 27, 15, 0, 0, 0, time.UTC)),
-			FinishedAt:       timePtr(time.Date(2026, 6, 27, 15, 1, 0, 0, time.UTC)),
+	for _, test := range []struct {
+		name      string
+		change    func(*gitrepo.Info, *engine.RunIdentity, *engine.RunRecord)
+		wantError string
+	}{
+		{name: "unchanged", change: func(*gitrepo.Info, *engine.RunIdentity, *engine.RunRecord) {}},
+		{name: "repo root", change: func(repo *gitrepo.Info, _ *engine.RunIdentity, _ *engine.RunRecord) { repo.Root = "/other" }, wantError: "repo root changed"},
+		{name: "repo slug", change: func(repo *gitrepo.Info, _ *engine.RunIdentity, _ *engine.RunRecord) { repo.RepoSlug = "other/repo" }, wantError: "repo slug changed"},
+		{name: "config path", change: func(_ *gitrepo.Info, identity *engine.RunIdentity, _ *engine.RunRecord) {
+			identity.ConfigPath = "/repo/other.toml"
+		}, wantError: "config path changed"},
+		{name: "config hash", change: func(_ *gitrepo.Info, identity *engine.RunIdentity, _ *engine.RunRecord) {
+			identity.ConfigHash = "cfg-2"
+		}, wantError: "config hash changed"},
+		{name: "plan hash", change: func(_ *gitrepo.Info, identity *engine.RunIdentity, _ *engine.RunRecord) { identity.PlanHash = "plan-2" }, wantError: "plan hash changed"},
+		{name: "dirty worktree", change: func(repo *gitrepo.Info, _ *engine.RunIdentity, _ *engine.RunRecord) { repo.DirtyWorktree = true }, wantError: "current worktree is dirty"},
+		{name: "no stored snapshot", change: func(_ *gitrepo.Info, _ *engine.RunIdentity, run *engine.RunRecord) { run.Meta.WorktreeTreeHash = "" }, wantError: "does not record a worktree snapshot"},
+		{name: "HEAD differs from worktree", change: func(repo *gitrepo.Info, _ *engine.RunIdentity, _ *engine.RunRecord) { repo.WorktreeTreeHash = "tree-2" }, wantError: "does not match current worktree"},
+		{
+			name: "HEAD differs from the tree that ran",
+			change: func(repo *gitrepo.Info, _ *engine.RunIdentity, _ *engine.RunRecord) {
+				repo.HeadTreeHash, repo.WorktreeTreeHash = "tree-2", "tree-2"
+			},
+			wantError: "does not match stored run snapshot",
 		},
-		Summary: persistence.Summary{Status: string(engine.StepStateSuccess)},
-	}
-
-	err := validatePublishableRun(repo, identity, run)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if got, want := err.Error(), "configured to post during execution"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			// A suppressed, finished run whose identity matches the current clean checkout.
+			repo := gitrepo.Info{Root: "/repo", RepoSlug: "owner/repo", HeadSHA: "def456", HeadTreeHash: "tree-1", WorktreeTreeHash: "tree-1"}
+			identity := engine.RunIdentity{RepoRoot: "/repo", RepoSlug: "owner/repo", HeadSHA: "def456", ConfigPath: "/repo/.local-ci.toml", ConfigHash: "cfg-1", PlanHash: "plan-1", WorktreeTreeHash: "tree-1"}
+			run := engine.RunRecord{
+				RunID: "run-1",
+				Meta: persistence.Meta{
+					RepoRoot: "/repo", RepoSlug: "owner/repo", ConfigPath: "/repo/.local-ci.toml", ConfigHash: "cfg-1", PlanHash: "plan-1",
+					GitHubEnabled: true, GitHubPostingSuppressed: "dirty_worktree", WorktreeTreeHash: "tree-1",
+					FinishedAt: timePtr(time.Date(2026, 6, 27, 15, 1, 0, 0, time.UTC)),
+				},
+				Summary: persistence.Summary{Status: string(engine.StepStateSuccess)},
+			}
+			test.change(&repo, &identity, &run)
+			err := validatePublishableRun(repo, identity, run)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("publishable run refused: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -258,7 +267,7 @@ func TestRunsListsNewestFirstAndMarksActiveRun(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 
-	if err := newCLI(stdout, stderr, fixture.root).run([]string{"runs"}); err != nil {
+	if err := newCLI(stdout, stderr, fixture.root).runWithContext(t.Context(), nil, []string{"runs"}); err != nil {
 		t.Fatalf("runs error = %v", err)
 	}
 
@@ -288,7 +297,7 @@ func TestShowWorksForActiveAndFinishedRuns(t *testing.T) {
 	fixture := newCLIFixture(t)
 
 	activeOut := &bytes.Buffer{}
-	if err := newCLI(activeOut, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID}); err != nil {
+	if err := newCLI(activeOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"show", fixture.activeRun.RunID}); err != nil {
 		t.Fatalf("show active error = %v", err)
 	}
 	activeText := activeOut.String()
@@ -315,7 +324,7 @@ func TestShowWorksForActiveAndFinishedRuns(t *testing.T) {
 	}
 
 	finishedOut := &bytes.Buffer{}
-	if err := newCLI(finishedOut, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.finishedRun.RunID}); err != nil {
+	if err := newCLI(finishedOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"show", fixture.finishedRun.RunID}); err != nil {
 		t.Fatalf("show finished error = %v", err)
 	}
 	finishedText := finishedOut.String()
@@ -342,6 +351,9 @@ func TestInspectionFlagsDeadRunner(t *testing.T) {
 		t.Fatalf("wait for process: %v", err)
 	}
 	if runnerAlive, known := getProcessAlive(deadProcessID); !known {
+		if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+			t.Fatal("process liveness must be known on darwin and linux")
+		}
 		t.Skip("process liveness is unavailable on this platform")
 	} else if runnerAlive {
 		t.Fatalf("finished process %d is still reported alive", deadProcessID)
@@ -352,12 +364,23 @@ func TestInspectionFlagsDeadRunner(t *testing.T) {
 		t.Fatalf("ReadJSONFile(meta) error = %v", err)
 	}
 	meta.RunnerPID = &deadProcessID
-	if err := persistence.WriteJSONFile(fixture.store.RunFile(fixture.activeRun.RunID, persistence.MetaFile), meta); err != nil {
+	metaPath := fixture.store.RunFile(fixture.activeRun.RunID, persistence.MetaFile)
+	if err := persistence.WriteJSONFile(metaPath, meta); err != nil {
 		t.Fatalf("WriteJSONFile(meta) error = %v", err)
 	}
+	storedMeta, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// A dead runner is reported, never repaired, by read commands.
+		if after, err := os.ReadFile(metaPath); err != nil || !bytes.Equal(storedMeta, after) {
+			t.Error("inspection rewrote meta.json")
+		}
+	})
 
 	runsOutput := &bytes.Buffer{}
-	if err := newCLI(runsOutput, &bytes.Buffer{}, fixture.root).run([]string{"runs"}); err != nil {
+	if err := newCLI(runsOutput, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"runs"}); err != nil {
 		t.Fatalf("runs error = %v", err)
 	}
 	if got := runsOutput.String(); !strings.Contains(got, "running (dead)") {
@@ -365,7 +388,7 @@ func TestInspectionFlagsDeadRunner(t *testing.T) {
 	}
 
 	showOutput := &bytes.Buffer{}
-	if err := newCLI(showOutput, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID}); err != nil {
+	if err := newCLI(showOutput, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"show", fixture.activeRun.RunID}); err != nil {
 		t.Fatalf("show error = %v", err)
 	}
 	if got := showOutput.String(); !strings.Contains(got, fmt.Sprintf("pid: %d (dead)", deadProcessID)) {
@@ -373,7 +396,7 @@ func TestInspectionFlagsDeadRunner(t *testing.T) {
 	}
 
 	jsonOutput := &bytes.Buffer{}
-	if err := newCLI(jsonOutput, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID, "--json"}); err != nil {
+	if err := newCLI(jsonOutput, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"show", fixture.activeRun.RunID, "--json"}); err != nil {
 		t.Fatalf("show --json error = %v", err)
 	}
 	var payload showJSON
@@ -391,7 +414,7 @@ func TestLogsDefaultsToRunnerAndSupportsStepViews(t *testing.T) {
 	fixture := newCLIFixture(t)
 
 	runnerOut := &bytes.Buffer{}
-	if err := newCLI(runnerOut, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID}); err != nil {
+	if err := newCLI(runnerOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"logs", fixture.activeRun.RunID}); err != nil {
 		t.Fatalf("runner logs error = %v", err)
 	}
 	if got := runnerOut.String(); !strings.Contains(got, "run started") || !strings.Contains(got, "start checks-fast") {
@@ -399,7 +422,7 @@ func TestLogsDefaultsToRunnerAndSupportsStepViews(t *testing.T) {
 	}
 
 	combinedOut := &bytes.Buffer{}
-	if err := newCLI(combinedOut, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID, "--step", "checks-fast"}); err != nil {
+	if err := newCLI(combinedOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"logs", fixture.activeRun.RunID, "--step", "checks-fast"}); err != nil {
 		t.Fatalf("combined step logs error = %v", err)
 	}
 	if got := combinedOut.String(); !strings.Contains(got, "combined output") {
@@ -407,7 +430,7 @@ func TestLogsDefaultsToRunnerAndSupportsStepViews(t *testing.T) {
 	}
 
 	stderrOut := &bytes.Buffer{}
-	if err := newCLI(stderrOut, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID, "--step", "checks-fast", "--stderr"}); err != nil {
+	if err := newCLI(stderrOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"logs", fixture.activeRun.RunID, "--step", "checks-fast", "--stderr"}); err != nil {
 		t.Fatalf("stderr step logs error = %v", err)
 	}
 	if got := stderrOut.String(); !strings.Contains(got, "stderr output") {
@@ -415,59 +438,40 @@ func TestLogsDefaultsToRunnerAndSupportsStepViews(t *testing.T) {
 	}
 }
 
-func TestLogsRejectsConflictingSelectors(t *testing.T) {
+func TestInspectionToleratesStatusAheadOfSummary(t *testing.T) {
 	t.Parallel()
 
 	fixture := newCLIFixture(t)
-	err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID, "--runner", "--planner"})
-	if err == nil {
-		t.Fatal("expected error")
+	// The writer saves a step's status before the summary, so a reader can land between the two.
+	advanceStatusPastSummary(t, fixture)
+	summaryPath := fixture.store.RunFile(fixture.activeRun.RunID, persistence.SummaryFile)
+	before, err := os.ReadFile(summaryPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, want := err.Error(), "choose exactly one log source"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
-	}
-}
 
-func TestLogsRejectsMissingStepValue(t *testing.T) {
-	t.Parallel()
-
-	fixture := newCLIFixture(t)
-	err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID, "--step", "--stderr"})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if got, want := err.Error(), "--step requires a value"; !strings.Contains(got, want) {
-		t.Fatalf("error = %v, want substring %q", err, want)
-	}
-}
-
-func TestShowFallsBackToBestEffortSnapshotDuringSummaryDrift(t *testing.T) {
-	t.Parallel()
-
-	fixture := newCLIFixture(t)
-	driftActiveRun(t, fixture)
-
-	stdout := &bytes.Buffer{}
-	if err := newCLI(stdout, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID}); err != nil {
+	showOutput := &bytes.Buffer{}
+	if err := newCLI(showOutput, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"show", fixture.activeRun.RunID}); err != nil {
 		t.Fatalf("show error = %v", err)
 	}
-	if got := stdout.String(); !strings.Contains(got, "status: running") {
-		t.Fatalf("show output = %q, want running status", got)
+	if got := showOutput.String(); !strings.Contains(got, "success") || !strings.Contains(got, "checks-fast") {
+		t.Fatalf("show output = %q, want the newer step status", got)
 	}
-}
-
-func TestRunsFallsBackToBestEffortSnapshotDuringSummaryDrift(t *testing.T) {
-	t.Parallel()
-
-	fixture := newCLIFixture(t)
-	driftActiveRun(t, fixture)
-
-	stdout := &bytes.Buffer{}
-	if err := newCLI(stdout, &bytes.Buffer{}, fixture.root).run([]string{"runs"}); err != nil {
+	runsOutput := &bytes.Buffer{}
+	if err := newCLI(runsOutput, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"runs"}); err != nil {
 		t.Fatalf("runs error = %v", err)
 	}
-	if got := stdout.String(); !strings.Contains(got, fixture.activeRun.RunID) || !strings.Contains(got, "running") {
-		t.Fatalf("runs output = %q, want active running run", got)
+	// runs lists every run, but a run it cannot load shows as an error row.
+	for _, line := range strings.Split(runsOutput.String(), "\n") {
+		if strings.HasPrefix(line, fixture.activeRun.RunID) && strings.Contains(line, "error") {
+			t.Fatalf("runs could not load the active run: %q", line)
+		}
+	}
+	if !strings.Contains(runsOutput.String(), fixture.activeRun.RunID) {
+		t.Fatalf("runs output = %q, want the active run", runsOutput.String())
+	}
+	if after, err := os.ReadFile(summaryPath); err != nil || !bytes.Equal(before, after) {
+		t.Fatal("inspection rewrote the stored summary")
 	}
 }
 
@@ -477,7 +481,7 @@ func TestJSONModes(t *testing.T) {
 	fixture := newCLIFixture(t)
 
 	runsOut := &bytes.Buffer{}
-	if err := newCLI(runsOut, &bytes.Buffer{}, fixture.root).run([]string{"runs", "--json"}); err != nil {
+	if err := newCLI(runsOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"runs", "--json"}); err != nil {
 		t.Fatalf("runs --json error = %v", err)
 	}
 	var runEntries []runListEntry
@@ -489,7 +493,7 @@ func TestJSONModes(t *testing.T) {
 	}
 
 	showOut := &bytes.Buffer{}
-	if err := newCLI(showOut, &bytes.Buffer{}, fixture.root).run([]string{"show", fixture.activeRun.RunID, "--json"}); err != nil {
+	if err := newCLI(showOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"show", fixture.activeRun.RunID, "--json"}); err != nil {
 		t.Fatalf("show --json error = %v", err)
 	}
 	var showPayload showJSON
@@ -506,7 +510,7 @@ func TestJSONModes(t *testing.T) {
 	}
 
 	logsOut := &bytes.Buffer{}
-	if err := newCLI(logsOut, &bytes.Buffer{}, fixture.root).run([]string{"logs", fixture.activeRun.RunID, "--json"}); err != nil {
+	if err := newCLI(logsOut, &bytes.Buffer{}, fixture.root).runWithContext(t.Context(), nil, []string{"logs", fixture.activeRun.RunID, "--json"}); err != nil {
 		t.Fatalf("logs --json error = %v", err)
 	}
 	var logsPayload logsJSON
@@ -668,18 +672,21 @@ func markRunActive(t *testing.T, store persistence.Store, run engine.RunRecord, 
 	}
 }
 
-func driftActiveRun(t *testing.T, fixture cliFixture) {
+// advanceStatusPastSummary finishes the active run's first step in status.json only.
+func advanceStatusPastSummary(t *testing.T, fixture cliFixture) {
 	t.Helper()
 
 	startedAt := time.Date(2026, 6, 27, 15, 6, 0, 0, time.UTC)
-	activeStatus := fixture.activeRun.StepStatuses[0]
-	activeStatus.State = string(engine.StepStateRunning)
-	activeStatus.StartedAt = &startedAt
-	activeStatus.FinishedAt = nil
-	activeStatus.DurationMillis = 0
-	activeStatus.ExitCode = nil
-	if err := persistence.WriteJSONFile(fixture.store.StepFile(fixture.activeRun.RunID, 0, activeStatus.StepID, persistence.StatusFile), activeStatus); err != nil {
-		t.Fatalf("WriteJSONFile(active status) error = %v", err)
+	finishedAt := startedAt.Add(time.Second)
+	exitCode := 0
+	status := fixture.activeRun.StepStatuses[0]
+	status.State = string(engine.StepStateSuccess)
+	status.StartedAt = &startedAt
+	status.FinishedAt = &finishedAt
+	status.DurationMillis = finishedAt.Sub(startedAt).Milliseconds()
+	status.ExitCode = &exitCode
+	if err := persistence.WriteJSONFile(fixture.store.StepFile(fixture.activeRun.RunID, 0, status.StepID, persistence.StatusFile), status); err != nil {
+		t.Fatalf("WriteJSONFile(status) error = %v", err)
 	}
 }
 

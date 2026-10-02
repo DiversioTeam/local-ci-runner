@@ -121,7 +121,7 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := appender.Append(runStartedAt, events.RunStarted, "", runStatusPending, ""); err != nil {
 		return RunRecord{}, err
 	}
-	postError := postPendingAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, runStartedAt)
+	postError := postPendingAggregateStatus(ctx, opts.Reporter, &appender, run.Meta)
 	if err := tolerateGitHubPostFailure(store, &run, postError); err != nil {
 		return RunRecord{}, err
 	}
@@ -150,7 +150,7 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := appender.Append(finishedAt, events.RunFinished, "", run.Summary.Status, ""); err != nil {
 		return RunRecord{}, err
 	}
-	finalPostError := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), finishedAt, opts.finalReportContext)
+	finalPostError := postFinalAggregateStatus(ctx, opts.Reporter, &appender, run.Meta, aggregateGitHubState(run.Summary.Status), opts.finalReportContext)
 	if err := tolerateGitHubPostFailure(store, &run, finalPostError); err != nil {
 		return RunRecord{}, err
 	}
@@ -179,7 +179,7 @@ func addStepStart(ctx context.Context, store persistence.Store, run *RunRecord, 
 	if ctx.Err() != nil {
 		return nil
 	}
-	postError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, status, startedAt, opts.finalReportContext)
+	postError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, status, opts.finalReportContext)
 	if err := tolerateGitHubPostFailure(store, run, postError); err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func addStepResult(ctx context.Context, store persistence.Store, run *RunRecord,
 		printProgress(opts.Progress, "log %s\n", store.StepFile(run.RunID, stepIndex, step.ID, persistence.CombinedLog))
 	}
 	contextStatus := getContextStepStatus(run.StepStatuses, *status)
-	terminalPostError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, contextStatus, finishedAt, opts.finalReportContext)
+	terminalPostError := postStepStatusDuringRun(ctx, opts.Reporter, appender, run.Meta, contextStatus, opts.finalReportContext)
 	if err := tolerateGitHubPostFailure(store, run, terminalPostError); err != nil {
 		return err
 	}
@@ -339,12 +339,11 @@ func postPendingAggregateStatus(
 	reporter ghstatus.Reporter,
 	appender *events.Appender,
 	meta persistence.Meta,
-	at time.Time,
 ) error {
 	if runContext.Err() != nil {
 		return nil
 	}
-	postError := postAggregateStatus(runContext, reporter, appender, meta, ghstatus.StatePending, at)
+	postError := postAggregateStatus(runContext, reporter, appender, meta, ghstatus.StatePending)
 	if isGitHubPostFailure(postError) && runContext.Err() != nil {
 		return nil
 	}
@@ -357,12 +356,11 @@ func postStepPendingStatusDuringRun(
 	appender *events.Appender,
 	meta persistence.Meta,
 	status persistence.StepStatus,
-	at time.Time,
 ) error {
 	if runContext.Err() != nil {
 		return nil
 	}
-	postError := postStepPendingStatus(runContext, reporter, appender, meta, status, at)
+	postError := postStepPendingStatus(runContext, reporter, appender, meta, status)
 	if isGitHubPostFailure(postError) && runContext.Err() != nil {
 		return nil
 	}
@@ -377,11 +375,10 @@ func postStepStatusDuringRun(
 	appender *events.Appender,
 	meta persistence.Meta,
 	status persistence.StepStatus,
-	at time.Time,
 	finalReportContext context.Context,
 ) error {
 	return postTerminalStatusDuringRun(runContext, finalReportContext, func(reportContext context.Context) error {
-		return postStepTerminalStatus(reportContext, reporter, appender, meta, status, at)
+		return postStepTerminalStatus(reportContext, reporter, appender, meta, status)
 	})
 }
 
@@ -391,11 +388,10 @@ func postFinalAggregateStatus(
 	appender *events.Appender,
 	meta persistence.Meta,
 	state ghstatus.State,
-	at time.Time,
 	finalReportContext context.Context,
 ) error {
 	return postTerminalStatusDuringRun(runContext, finalReportContext, func(reportContext context.Context) error {
-		return postAggregateStatus(reportContext, reporter, appender, meta, state, at)
+		return postAggregateStatus(reportContext, reporter, appender, meta, state)
 	})
 }
 

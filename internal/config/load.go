@@ -32,8 +32,8 @@ func Load(path string) (File, error) {
 	if meta.IsDefined("max_parallel") && cfg.MaxParallel <= 0 {
 		return File{}, fmt.Errorf("max_parallel must be a positive integer")
 	}
-	cfg.ApplyDefaults()
-	if err := cfg.Validate(); err != nil {
+	cfg.applyDefaults()
+	if err := cfg.validate(); err != nil {
 		return File{}, fmt.Errorf("validate %s: %w", absPath, err)
 	}
 

@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,35 +28,19 @@ type runFixture struct {
 	store      persistence.Store
 }
 
-func TestPrepareRunWritesPlannerLog(t *testing.T) {
+func TestPrepareRunWritesArtifacts(t *testing.T) {
 	t.Parallel()
 
 	fixture := newRunFixture(t, samplePlan())
 	run, err := PrepareRun(fixture.store, PrepareOptions{
 		Identity:   fixture.identity,
 		Plan:       fixture.plan,
-		GitHub:     fixture.github,
 		PlannerLog: "planner log\n",
 		Now:        fixedRunTime,
 		Random:     bytes.NewReader(cloneBytes(fixedRunEntropy)),
 	})
 	if err != nil {
 		t.Fatalf("PrepareRun() error = %v", err)
-	}
-
-	if got, want := mustReadTextFile(t, fixture.store.RunFile(run.RunID, persistence.PlannerLogFile)), "planner log\n"; got != want {
-		t.Fatalf("planner log = %q, want %q", got, want)
-	}
-}
-
-func TestPrepareRunWritesArtifacts(t *testing.T) {
-	t.Parallel()
-
-	fixture := newRunFixture(t, samplePlan())
-	run := prepareRunFixture(t, fixture)
-
-	if got, want := run.RunID, "20260627T150405Z-deadbeef"; got != want {
-		t.Fatalf("RunID = %q, want %q", got, want)
 	}
 
 	for _, path := range []string{
@@ -102,37 +87,41 @@ func TestPrepareRunWritesArtifacts(t *testing.T) {
 	if got, want := planEnv["CHANGED_SCOPE"], "python"; got != want {
 		t.Fatalf("plan env = %q, want %q", got, want)
 	}
-}
-
-func TestPrepareRunAppliesDefaultGitHubAggregateContext(t *testing.T) {
-	t.Parallel()
-
-	fixture := newRunFixtureWithGitHub(t, samplePlan(), config.GitHub{Enabled: true})
-	run := prepareRunFixture(t, fixture)
-
-	if got, want := run.Meta.GitHubAggregateContext, config.DefaultAggregateContext; got != want {
-		t.Fatalf("GitHubAggregateContext = %q, want %q", got, want)
+	if got, want := mustReadFile(t, fixture.store.RunFile(run.RunID, persistence.PlannerLogFile)), "planner log\n"; got != want {
+		t.Fatalf("planner log = %q, want %q", got, want)
 	}
 }
 
 func TestPrepareRunRejectsIdentityDrift(t *testing.T) {
 	t.Parallel()
 
-	fixture := newRunFixture(t, samplePlan())
-	badIdentity := fixture.identity
-	badIdentity.PlanHash = "wrong"
-
-	_, err := PrepareRun(fixture.store, PrepareOptions{
-		Identity: badIdentity,
-		Plan:     fixture.plan,
-		Now:      fixedRunTime,
-		Random:   bytes.NewReader(cloneBytes(fixedRunEntropy)),
-	})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "plan hash does not match current plan") {
-		t.Fatalf("error = %v", err)
+	for _, test := range []struct {
+		name      string
+		change    func(t *testing.T, fixture *runFixture, options *PrepareOptions)
+		wantError string
+	}{
+		{name: "store at another root", change: func(t *testing.T, _ *runFixture, options *PrepareOptions) { options.Identity.RepoRoot = t.TempDir() }, wantError: "store root"},
+		{
+			name: "config rewritten after hashing",
+			change: func(t *testing.T, fixture *runFixture, _ *PrepareOptions) {
+				writeFile(t, fixture.configPath, []byte("version = 1\n# changed\n"))
+			},
+			wantError: "config hash does not match current config file",
+		},
+		{name: "plan changed after hashing", change: func(_ *testing.T, _ *runFixture, options *PrepareOptions) { options.Identity.PlanHash = "wrong" }, wantError: "plan hash does not match current plan"},
+		{name: "posting without an aggregate context", change: func(_ *testing.T, _ *runFixture, options *PrepareOptions) {
+			options.GitHub = config.GitHub{Enabled: true}
+		}, wantError: "aggregate context is required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newRunFixture(t, samplePlan())
+			options := PrepareOptions{Identity: fixture.identity, Plan: fixture.plan, Now: fixedRunTime, Random: bytes.NewReader(cloneBytes(fixedRunEntropy))}
+			test.change(t, &fixture, &options)
+			if _, err := PrepareRun(fixture.store, options); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -209,6 +198,15 @@ func TestValidateResumeRejectsIdentityChanges(t *testing.T) {
 			wantErr: "HEAD SHA changed",
 		},
 		{
+			// resume --config can point at an identical file somewhere else.
+			name: "config path",
+			mutate: func(current RunIdentity) RunIdentity {
+				current.ConfigPath = "/repo/other.toml"
+				return current
+			},
+			wantErr: "config path changed",
+		},
+		{
 			name: "config hash",
 			mutate: func(current RunIdentity) RunIdentity {
 				current.ConfigHash = "other"
@@ -251,8 +249,10 @@ func TestValidateResumeRejectsIdentityChanges(t *testing.T) {
 func TestMarkStaleFromStepMarksDownstream(t *testing.T) {
 	t.Parallel()
 
+	// Rerunning "lint" must reach "package" through "test", not just direct dependents.
 	plan := config.ResolvedPlan{Steps: []config.Step{
-		{ID: "lint", Command: []string{"./scripts/lint.sh"}},
+		{ID: "root", Command: []string{"./scripts/root.sh"}},
+		{ID: "lint", Command: []string{"./scripts/lint.sh"}, Needs: []string{"root"}},
 		{ID: "test", Command: []string{"./scripts/test.sh"}, Needs: []string{"lint"}},
 		{ID: "package", Command: []string{"./scripts/package.sh"}, Needs: []string{"test"}},
 		{ID: "docs", Command: []string{"./scripts/docs.sh"}},
@@ -260,37 +260,18 @@ func TestMarkStaleFromStepMarksDownstream(t *testing.T) {
 	plan.ApplyDefaults()
 
 	statuses := InitialStepStatuses(plan)
-	completedAt := fixedRunTime
 	for index := range statuses {
-		startedAt := completedAt
 		exitCode := 0
-		statuses[index].State = string(StepStateSuccess)
-		statuses[index].StartedAt = &startedAt
-		statuses[index].FinishedAt = &completedAt
-		statuses[index].ExitCode = &exitCode
+		setCompletedState(&statuses[index], StepStateSuccess, fixedRunTime, fixedRunTime, &exitCode)
 	}
 
-	updated, err := MarkStaleFromStep(plan, statuses, "test")
+	updated, err := MarkStaleFromStep(plan, statuses, "lint")
 	if err != nil {
 		t.Fatalf("MarkStaleFromStep() error = %v", err)
 	}
-
-	states := map[string]string{}
-	for _, status := range updated {
-		states[status.StepID] = status.State
-	}
-
-	if got, want := states["lint"], string(StepStateSuccess); got != want {
-		t.Fatalf("lint state = %q, want %q", got, want)
-	}
-	if got, want := states["test"], string(StepStateStale); got != want {
-		t.Fatalf("test state = %q, want %q", got, want)
-	}
-	if got, want := states["package"], string(StepStateStale); got != want {
-		t.Fatalf("package state = %q, want %q", got, want)
-	}
-	if got, want := states["docs"], string(StepStateSuccess); got != want {
-		t.Fatalf("docs state = %q, want %q", got, want)
+	want := map[string]string{"root": "success", "lint": "stale", "test": "stale", "package": "stale", "docs": "success"}
+	if got := statusStates(updated); !maps.Equal(got, want) {
+		t.Fatalf("states = %v, want %v", got, want)
 	}
 }
 
@@ -360,21 +341,6 @@ func TestPrepareRunWithEmptyPlanStartsSuccessful(t *testing.T) {
 	}
 }
 
-func TestMarkStaleFromStepRejectsUnknownStatus(t *testing.T) {
-	t.Parallel()
-
-	plan := samplePlan()
-	statuses := []persistence.StepStatus{{StepID: "other", State: string(StepStateSuccess)}}
-
-	_, err := MarkStaleFromStep(plan, statuses, "lint")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), `unknown step status "other"`) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestLoadRunRejectsStepStatusStateDrift(t *testing.T) {
 	t.Parallel()
 
@@ -402,24 +368,46 @@ func TestLoadRunRejectsStepStatusStateDrift(t *testing.T) {
 func TestLoadRunRejectsStepStatusDrift(t *testing.T) {
 	t.Parallel()
 
-	fixture := newRunFixture(t, samplePlan())
-	run := prepareRunFixture(t, fixture)
-
-	status, err := persistence.ReadJSONFile[persistence.StepStatus](fixture.store.StepFile(run.RunID, 0, "lint", persistence.StatusFile))
-	if err != nil {
-		t.Fatalf("ReadJSONFile() error = %v", err)
-	}
-	status.StdoutLog = "wrong.log"
-	if err := persistence.WriteJSONFile(fixture.store.StepFile(run.RunID, 0, "lint", persistence.StatusFile), status); err != nil {
-		t.Fatalf("WriteJSONFile() error = %v", err)
-	}
-
-	_, err = LoadRun(fixture.store, run.RunID)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "stored stdout log path does not match persisted plan") {
-		t.Fatalf("error = %v", err)
+	for _, test := range []struct {
+		name      string
+		change    func(*persistence.StepStatus, *persistence.Summary)
+		wantError string
+	}{
+		{name: "log path", change: func(status *persistence.StepStatus, _ *persistence.Summary) { status.StdoutLog = "wrong.log" }, wantError: "stored stdout log path does not match persisted plan"},
+		{
+			// The summary is rewritten too, so only the status-against-plan check can refuse it.
+			name: "step id",
+			change: func(status *persistence.StepStatus, summary *persistence.Summary) {
+				status.StepID, summary.Steps[0].StepID = "other", "other"
+			},
+			wantError: "stored step id does not match persisted plan",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newRunFixture(t, samplePlan())
+			run := prepareRunFixture(t, fixture)
+			statusPath := fixture.store.StepFile(run.RunID, 0, "lint", persistence.StatusFile)
+			summaryPath := fixture.store.RunFile(run.RunID, persistence.SummaryFile)
+			status, err := persistence.ReadJSONFile[persistence.StepStatus](statusPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			summary, err := persistence.ReadJSONFile[persistence.Summary](summaryPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.change(&status, &summary)
+			if err := persistence.WriteJSONFile(statusPath, status); err != nil {
+				t.Fatal(err)
+			}
+			if err := persistence.WriteJSONFile(summaryPath, summary); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadRun(fixture.store, run.RunID); err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -442,6 +430,9 @@ func newRunFixture(t *testing.T, plan config.ResolvedPlan) runFixture {
 func newRunFixtureWithGitHub(t *testing.T, plan config.ResolvedPlan, githubConfig config.GitHub) runFixture {
 	t.Helper()
 
+	if githubConfig.Enabled && githubConfig.AggregateContext == "" {
+		githubConfig.AggregateContext = config.DefaultAggregateContext
+	}
 	repoRoot := t.TempDir()
 	configPath := filepath.Join(repoRoot, config.DefaultPath)
 	writeFile(t, configPath, []byte("version = 1\n"))
@@ -488,16 +479,6 @@ func prepareSuppressedRunFixture(t *testing.T, fixture runFixture, suppressedRea
 
 func cloneBytes(src []byte) []byte {
 	return append([]byte(nil), src...)
-}
-
-func mustReadTextFile(t *testing.T, path string) string {
-	t.Helper()
-
-	payload, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile(%s) error = %v", path, err)
-	}
-	return string(payload)
 }
 
 func writeFile(t *testing.T, path string, content []byte) {

@@ -261,9 +261,9 @@ func TestPendingReportingPreservesReceiptErrorsDuringCancellation(t *testing.T) 
 				return nil
 			})
 			if stepPending {
-				err = postStepPendingStatusDuringRun(ctx, reporter, &appender, run.Meta, run.StepStatuses[0], time.Now())
+				err = postStepPendingStatusDuringRun(ctx, reporter, &appender, run.Meta, run.StepStatuses[0])
 			} else {
-				err = postPendingAggregateStatus(ctx, reporter, &appender, run.Meta, time.Now())
+				err = postPendingAggregateStatus(ctx, reporter, &appender, run.Meta)
 			}
 			if err == nil || !strings.Contains(err.Error(), "receipt was not saved") {
 				t.Fatalf("local receipt failure was swallowed during cancellation: %v", err)

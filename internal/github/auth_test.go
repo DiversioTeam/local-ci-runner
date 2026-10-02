@@ -1,37 +1,31 @@
 package github
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
-func TestCLIEnvWithoutTokenStripsGenericGitHubTokens(t *testing.T) {
+func TestCLIEnv(t *testing.T) {
 	t.Parallel()
 
 	base := []string{"A=1", "GH_TOKEN=old", "GITHUB_TOKEN=older", "B=2"}
-	got := CLIEnv(base, "")
-
-	want := []string{"A=1", "B=2"}
-	if len(got) != len(want) {
-		t.Fatalf("len = %d, want %d", len(got), len(want))
+	for _, test := range []struct {
+		name  string
+		token string
+		want  []string
+	}{
+		// Without a runner token, gh falls back to its own auth, never an ambient token.
+		{name: "no runner token", want: []string{"A=1", "B=2"}},
+		{name: "runner token", token: "runner-token", want: []string{"A=1", "B=2", "GH_TOKEN=runner-token", "GITHUB_TOKEN=runner-token"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := cliEnv(base, test.token); !slices.Equal(got, test.want) {
+				t.Fatalf("env = %v, want %v", got, test.want)
+			}
+		})
 	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("env[%d] = %q, want %q", index, got[index], want[index])
-		}
-	}
-}
-
-func TestCLIEnvInjectsRunnerToken(t *testing.T) {
-	t.Parallel()
-
-	base := []string{"A=1", "GH_TOKEN=old", "GITHUB_TOKEN=older", "B=2"}
-	got := CLIEnv(base, "runner-token")
-
-	want := []string{"A=1", "B=2", "GH_TOKEN=runner-token", "GITHUB_TOKEN=runner-token"}
-	if len(got) != len(want) {
-		t.Fatalf("len = %d, want %d", len(got), len(want))
-	}
-	for index := range want {
-		if got[index] != want[index] {
-			t.Fatalf("env[%d] = %q, want %q", index, got[index], want[index])
-		}
+	// Operators configure this name; auth variables this tool reads must carry the LOCAL_CI_ prefix.
+	if TokenEnvVar != "LOCAL_CI_GITHUB_TOKEN" {
+		t.Fatalf("TokenEnvVar = %q", TokenEnvVar)
 	}
 }
