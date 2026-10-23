@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/DiversioTeam/local-ci-runner/internal/agentsession"
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
+	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
 	"github.com/DiversioTeam/local-ci-runner/internal/gitrepo"
 )
 
@@ -24,27 +26,34 @@ func agentSessionStep() config.Step {
 		GitHubContext: agentsession.GitHubContext}
 }
 
-// openPullRequest asks gh for the branch's open PR. No gh, no PR, or a gh error all mean "no PR known", and the check
-// then relies on the local record.
-func openPullRequest(ctx context.Context, repoSlug string, branch string) (*agentsession.PullRequest, string) {
+// openPullRequest asks GitHub for the branch's open PR, with the same credentials and host as status posting. A
+// confirmed absence returns nil; a failed lookup (no gh, auth, network, rate limit) returns an error, and the check then
+// fails closed instead of trusting the local record.
+func openPullRequest(ctx context.Context, repoSlug string, branch string) (*agentsession.PullRequest, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
-		return nil, "gh not found; checked the local record only"
+		return nil, errors.New("gh is not installed")
 	}
+	owner, _, _ := strings.Cut(repoSlug, "/")
 	lookup, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(lookup, "gh", "pr", "view", branch, "-R", repoSlug, "--json", "number,state,body").Output()
+	path := fmt.Sprintf("repos/%s/pulls?state=open&head=%s", repoSlug, url.QueryEscape(owner+":"+branch))
+	command := exec.CommandContext(lookup, "gh", "api", "--hostname", "github.com", path)
+	command.Env = ghstatus.CLIEnv(os.Environ(), os.Getenv(ghstatus.TokenEnvVar))
+	output, err := command.Output()
 	if err != nil {
-		return nil, ""
+		return nil, errors.New("gh could not read the PR (check gh auth status or LOCAL_CI_GITHUB_TOKEN)")
 	}
-	var view struct {
+	var pulls []struct {
 		Number int    `json:"number"`
-		State  string `json:"state"`
 		Body   string `json:"body"`
 	}
-	if json.Unmarshal(output, &view) != nil || view.State != "OPEN" || view.Number == 0 {
-		return nil, ""
+	if err := json.Unmarshal(output, &pulls); err != nil {
+		return nil, errors.New("GitHub returned an unreadable PR list")
 	}
-	return &agentsession.PullRequest{Number: view.Number, Body: view.Body}, ""
+	if len(pulls) == 0 {
+		return nil, nil
+	}
+	return &agentsession.PullRequest{Number: pulls[0].Number, Body: pulls[0].Body}, nil
 }
 
 func (c *cli) agentSessionCheckCommand(ctx context.Context) error {
@@ -60,16 +69,15 @@ func (c *cli) agentSessionCheckCommand(ctx context.Context) error {
 		return fmt.Errorf("read the agent-session record: %w", err)
 	}
 	var pr *agentsession.PullRequest
-	note := ""
+	lookupError := ""
 	if branch != "" {
-		pr, note = openPullRequest(ctx, repository.RepoSlug, branch)
+		if pr, err = openPullRequest(ctx, repository.RepoSlug, branch); err != nil {
+			lookupError = err.Error()
+		}
 	}
 	result := agentsession.Check(agentsession.Input{RepoRoot: repository.Root, RepoSlug: repository.RepoSlug, Branch: branch,
-		HeadSHA: repository.HeadSHA, PR: pr, Published: published, CLI: agentsession.FindCLI(home)})
+		HeadSHA: repository.HeadSHA, PR: pr, PRLookupError: lookupError, Published: published, CLI: agentsession.FindCLI(home)})
 	fmt.Fprintln(c.stdout, result.Message)
-	if note != "" {
-		fmt.Fprintln(c.stdout, "note: "+note)
-	}
 	if !result.OK {
 		return errAgentSessionFailed
 	}

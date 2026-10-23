@@ -8,6 +8,9 @@ const (
 	githubTokenEnvVar = "GITHUB_TOKEN"
 )
 
+// CLIEnv is cliEnv for other gh callers in this binary (the agent-session PR lookup).
+func CLIEnv(base []string, token string) []string { return cliEnv(base, token) }
+
 // cliEnv drops inherited generic GitHub tokens, so only LOCAL_CI_GITHUB_TOKEN or gh auth can post.
 func cliEnv(base []string, token string) []string {
 	env := make([]string, 0, len(base)+2)

@@ -202,6 +202,30 @@ func TestPublishRefusesRunForChangedCheckout(t *testing.T) {
 	}
 }
 
+func TestPublishRefusesAgentSessionResultsForAnotherCommit(t *testing.T) {
+	t.Parallel()
+
+	root := newGitRepo(t)
+	writeFile(t, filepath.Join(root, config.DefaultPath), []byte("version = 1\n[github]\nenabled = true\n[[steps]]\nid = 'agent-session'\ncommand = ['sh', '-c', 'exit 0']\n"))
+	runGit(t, root, "add", config.DefaultPath)
+	runGit(t, root, "commit", "-m", "config")
+	// Run on a dirty worktree at commit A, then commit exactly that snapshot as B: same tree, different SHA.
+	writeFile(t, filepath.Join(root, "README.md"), []byte("changed before the run\n"))
+	var stdout bytes.Buffer
+	if err := newCLI(&stdout, &bytes.Buffer{}, root).runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var completed showJSON
+	if err := json.Unmarshal(stdout.Bytes(), &completed); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "commit", "-am", "B")
+	err := newCLI(&bytes.Buffer{}, &bytes.Buffer{}, root).runWithContext(t.Context(), nil, []string{"publish", completed.RunID})
+	if err == nil || !strings.Contains(err.Error(), "agent-session check ran for commit") {
+		t.Fatalf("publish error = %v, want the agent-session commit refusal", err)
+	}
+}
+
 func TestValidatePublishableRunRefusesChangedIdentityOrSnapshot(t *testing.T) {
 	t.Parallel()
 

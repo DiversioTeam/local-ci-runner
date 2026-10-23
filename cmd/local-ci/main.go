@@ -778,6 +778,12 @@ func validatePublishableRun(repo gitrepo.Info, identity engine.RunIdentity, run 
 	if repo.HeadTreeHash != run.Meta.WorktreeTreeHash {
 		return fmt.Errorf("publish refused: current HEAD tree %s does not match stored run snapshot %s", repo.HeadTreeHash, run.Meta.WorktreeTreeHash)
 	}
+	// The agent-session check is about a commit, not a tree: its result for one SHA says nothing about another.
+	for _, step := range run.Plan.Steps {
+		if step.ID == agentsession.StepID && run.Meta.HeadSHA != repo.HeadSHA {
+			return fmt.Errorf("publish refused: the agent-session check ran for commit %s, not %s; run local-ci again on this commit", run.Meta.HeadSHA, repo.HeadSHA)
+		}
+	}
 	return nil
 }
 

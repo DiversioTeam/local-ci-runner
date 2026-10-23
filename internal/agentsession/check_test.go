@@ -3,6 +3,7 @@ package agentsession
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -24,9 +25,9 @@ func TestFailureOutputIsPinned(t *testing.T) {
 	in.PR = &PullRequest{Number: 79, Body: "## Agent sessions\n\n- [Agent session transcript](" + oldLink + ")\n"}
 	got := Check(in)
 	want := `agent-session: stale (transcript covers fedcba987654, HEAD is 0123456789ab) for DiversioTeam/courage branch feature/x PR #79
-fix: python3 "` + cli + `" share --repo "/work/courage" --pr 79
+fix: python3 '` + cli + `' share --repo '/work/courage' --pr 79
 next: share renders a redacted preview, publishes it to internal-share, and puts its link in the PR body's "## Agent sessions" section; on a branch's first publish it stops (exit 3) for the developer's review, then rerun with --yes. Run local-ci again afterwards.
-no agent worked on this branch: python3 "` + cli + `" declare-none "<reason>" --repo "/work/courage" --pr 79 (writes "No agent session: <reason>")`
+no agent worked on this branch: python3 '` + cli + `' declare-none '<reason>' --repo '/work/courage' --pr 79 (writes "No agent session: <reason>")`
 	if got.OK || got.Kind != "stale" || got.Message != want {
 		t.Fatalf("got %+v\nwant message:\n%s", got, want)
 	}
@@ -38,11 +39,33 @@ func TestMissingWithoutCLIExplainsInstall(t *testing.T) {
 	got := Check(in)
 	want := `agent-session: missing (no transcript published for this branch) for DiversioTeam/courage branch feature/x
 install: claude plugin install agent-session@diversiotech (or the Codex/Pi agent-session skill), then run the fix
-fix: python3 "<agent-session skill>/scripts/agent_session.py" share --repo "/work/courage"
+fix: python3 '<agent-session skill>/scripts/agent_session.py' share --repo '/work/courage'
 next: share renders a redacted preview, publishes it to internal-share, and puts its link in the PR body's "## Agent sessions" section; on a branch's first publish it stops (exit 3) for the developer's review, then rerun with --yes. Run local-ci again afterwards.
-no agent worked on this branch: python3 "<agent-session skill>/scripts/agent_session.py" declare-none "<reason>" --repo "/work/courage" (writes "No agent session: <reason>")`
+no agent worked on this branch: python3 '<agent-session skill>/scripts/agent_session.py' declare-none '<reason>' --repo '/work/courage' (writes "No agent session: <reason>")`
 	if got.OK || got.Message != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got.Message, want)
+	}
+}
+
+func TestPathsAreQuotedLiterally(t *testing.T) {
+	in := input()
+	in.RepoRoot = "/work/$(touch marker)/it's"
+	got := Check(in)
+	if !strings.Contains(got.Message, `--repo '/work/$(touch marker)/it'\''s'`) {
+		t.Fatalf("unsafe quoting:\n%s", got.Message)
+	}
+}
+
+func TestLookupFailureFailsClosed(t *testing.T) {
+	in := input()
+	in.Published = &Published{Repo: "DiversioTeam/courage", Branch: "feature/x", Head: head, Links: []string{link}}
+	in.PRLookupError = "gh could not read the PR (check gh auth status or LOCAL_CI_GITHUB_TOKEN)"
+	got := Check(in)
+	want := "agent-session: unverified (gh could not read the PR (check gh auth status or LOCAL_CI_GITHUB_TOKEN)) for DiversioTeam/courage branch feature/x\n" +
+		"fix: gh auth login (or set LOCAL_CI_GITHUB_TOKEN), then run local-ci again\n" +
+		"next: with the PR readable, the check compares the PR body's agent session link with HEAD"
+	if got.OK || got.Kind != "unverified" || got.Message != want {
+		t.Fatalf("got %+v", got)
 	}
 }
 

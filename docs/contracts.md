@@ -141,7 +141,11 @@ It passes when the branch HEAD is covered:
 - with an open PR (looked up with `gh pr view <branch>`), the PR body links an `internal-share.diversio.com/session-…-h<HEAD12>-….html` page, or has a `No agent session: <reason>` line;
 - with no PR, the skill's local record (`~/.agent/sessions/published.jsonl`, or `$AGENT_SESSION_HOME/published.jsonl`) has a publish for this repository, branch and HEAD, or a declaration.
 
-Its output is a contract for coding agents and people, pinned by tests. The first line is `agent-session: ok|missing|stale|unlinked (detail) for <repo> branch <branch>[ PR #N]`. A failure is followed by `fix:` (the exact `agent_session.py share` command), `next:`, and the declaration alternative. When the skill is not installed, an `install:` line comes first. A failure exits 1.
+The PR lookup uses `gh api --hostname github.com` with the same credentials as status posting (`LOCAL_CI_GITHUB_TOKEN`, else gh's login; inherited `GH_TOKEN`/`GITHUB_TOKEN` are dropped). A lookup that fails, as opposed to finding no open PR, fails the check as `unverified` instead of trusting the local record.
+
+Its output is a contract for coding agents and people, pinned by tests. The first line is `agent-session: ok|missing|stale|unlinked|unverified (detail) for <repo> branch <branch>[ PR #N]`. A failure is followed by `fix:` (the exact `agent_session.py share` command, arguments single-quoted so they pass literally), `next:`, and the declaration alternative. When the skill is not installed, an `install:` line comes first. A failure exits 1.
+
+The result is about a commit, not a tree, so `publish` refuses to post a run containing the `agent-session` step to any commit other than the one it ran on.
 
 Older binaries reject `agent_session` as an unknown field, so upgrade local-ci before a repository opts in.
 

@@ -53,12 +53,14 @@ type Published struct {
 
 // Input is everything the check decides from; Check itself does no I/O.
 type Input struct {
-	RepoRoot  string
-	RepoSlug  string
-	Branch    string
-	HeadSHA   string
-	PR        *PullRequest
-	Published *Published
+	RepoRoot string
+	RepoSlug string
+	Branch   string
+	HeadSHA  string
+	PR       *PullRequest
+	// Why the open PR could not be read, if it could not; the check then fails closed.
+	PRLookupError string
+	Published     *Published
 	// The skill's CLI (agent_session.py), when it is installed; empty otherwise.
 	CLI string
 }
@@ -97,6 +99,11 @@ func Check(in Input) Result {
 	if in.Branch == "" {
 		return fail(in, "missing", "(detached HEAD; check out the PR's branch)", where)
 	}
+	if in.PRLookupError != "" {
+		return Result{OK: false, Kind: "unverified", Message: fmt.Sprintf("agent-session: unverified (%s) %s\n", in.PRLookupError, where) +
+			"fix: gh auth login (or set LOCAL_CI_GITHUB_TOKEN), then run local-ci again\n" +
+			"next: with the PR readable, the check compares the PR body's agent session link with HEAD"}
+	}
 	publishedHere := in.Published != nil && in.Published.None == "" && strings.HasPrefix(in.Published.Head, head) && len(in.Published.Links) > 0
 
 	if in.PR != nil {
@@ -130,8 +137,9 @@ func Check(in Input) Result {
 	return fail(in, "missing", "(no transcript published for this branch)", where)
 }
 
+// quote is POSIX single-quoting: the command an agent copies passes paths literally, `$(…)` and backticks included.
 func quote(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func fail(in Input, kind string, detail string, where string) Result {
