@@ -57,6 +57,7 @@ env = { MODE = "fast" }
 - Consumer repos must order steps sharing databases, generated files, build directories, or other mutable resources; missing dependency edges are not proof of resource independence.
 - `github_context` is optional; if missing, the runner defaults to `local/<step-id>`.
 - `if` currently supports only `true` and `false`.
+- Top-level `agent_session = true` (Diversio policy, opt-in) appends the built-in step `agent-session` (context `local/agent-session`, command `local-ci agent-session-check`) after the static or planner steps. See section 3a.
 
 ## 2. Planner stdout
 
@@ -131,6 +132,18 @@ The scheduler alone writes statuses, summaries, events, and GitHub receipts. Wor
 `plan [--json]` executes the planner but not verification steps, creates no run artifacts, and posts no statuses. It exposes snapshot/config/plan identity, `max_parallel`, and the complete plan. Planner code may have side effects; this is not guaranteed read-only inspection. Preparation refuses changes to repository identity, HEAD, worktree snapshot, or configuration during planning, before starting checks or creating a run. Generated outputs must use ignored or runner-artifact paths.
 
 `resume --from-step <id>` records stale events and refreshes pending contexts for that step and all dependents, then reruns them while reusing unrelated successes. Other unfinished/failed work is also reconsidered. No partial-plan verification command is provided.
+
+## 3a. Built-in agent-session check
+
+Every Diversio PR links a redacted transcript of the agent sessions behind it (the `agent-session` skill in DiversioTeam/agent-skills-marketplace). The check is org policy, not one repository's workflow, so it ships in the runner and each repository opts in with one line, `agent_session = true`. It runs as an ordinary black-box step: `local-ci agent-session-check`, resolved through `PATH`.
+
+It passes when the branch HEAD is covered:
+- with an open PR (looked up with `gh pr view <branch>`), the PR body links an `internal-share.diversio.com/session-…-h<HEAD12>-….html` page, or has a `No agent session: <reason>` line;
+- with no PR, the skill's local record (`~/.agent/sessions/published.jsonl`, or `$AGENT_SESSION_HOME/published.jsonl`) has a publish for this repository, branch and HEAD, or a declaration.
+
+Its output is a contract for coding agents and people, pinned by tests. The first line is `agent-session: ok|missing|stale|unlinked (detail) for <repo> branch <branch>[ PR #N]`. A failure is followed by `fix:` (the exact `agent_session.py share` command), `next:`, and the declaration alternative. When the skill is not installed, an `install:` line comes first. A failure exits 1.
+
+Older binaries reject `agent_session` as an unknown field, so upgrade local-ci before a repository opts in.
 
 ## 4. Run artifacts
 

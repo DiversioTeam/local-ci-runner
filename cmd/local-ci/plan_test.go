@@ -152,3 +152,27 @@ func TestFailedRunStillEmitsInspectableJSON(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 }
+
+func TestAgentSessionOptInAddsTheBuiltInStep(t *testing.T) {
+	t.Parallel()
+	root := newGitRepo(t)
+	writeFile(t, filepath.Join(root, config.DefaultPath), []byte(`version = 1
+agent_session = true
+[[steps]]
+id = "test"
+command = ["true"]
+`))
+	var stdout, stderr bytes.Buffer
+	if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"plan", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var planned planJSON
+	if err := json.Unmarshal(stdout.Bytes(), &planned); err != nil {
+		t.Fatal(err)
+	}
+	steps := planned.Plan.Steps
+	if len(steps) != 2 || steps[1].ID != "agent-session" || strings.Join(steps[1].Command, " ") != "local-ci agent-session-check" ||
+		steps[1].GitHubContext != "local/agent-session" {
+		t.Fatalf("steps = %+v", steps)
+	}
+}

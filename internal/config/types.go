@@ -12,6 +12,8 @@ type File struct {
 	Planner     *Planner `toml:"planner" json:"planner,omitempty"`
 	GitHub      GitHub   `toml:"github" json:"github"`
 	Steps       []Step   `toml:"steps" json:"steps,omitempty"`
+	// AgentSession adds the built-in agent-session step (internal/agentsession): one line, `agent_session = true`.
+	AgentSession bool `toml:"agent_session" json:"agent_session,omitempty"`
 }
 
 type Planner struct {

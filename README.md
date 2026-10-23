@@ -147,6 +147,11 @@ local-ci show <run-id>
 local-ci logs <run-id>
 ```
 
+Diversio repositories opt into the agent session transcript check with one
+top-level line, `agent_session = true`. It adds the `local/agent-session` step,
+which fails with `agent-session: missing|stale|unlinked` and the exact fix
+command when no published transcript covers HEAD (see `docs/contracts.md`).
+
 Opt into bounded parallel execution with top-level `max_parallel = 3` in the config. Use `needs` to order steps sharing mutable resources. Optional step `timeout = "10m"` fails and stops only that step. Configs without these fields stay serial with no deadline.
 
 ```bash

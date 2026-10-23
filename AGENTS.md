@@ -65,7 +65,8 @@ local-ci run
 
 ## Non-negotiable rules
 
-- Keep repo-specific CI logic out of the runner; consumer repos own checks and planners.
+- Keep repo-specific CI logic out of the runner; consumer repos own checks and planners. The one exception is org-wide
+  policy that every Diversio repo opts into with one line (today: `agent_session`, `internal/agentsession`).
 - No relative/local imports; keep the internal package graph acyclic.
 - Persist typed contracts, not `map[string]any`.
 - The engine is the source of truth; the CLI is a thin operator surface, not a second execution path.

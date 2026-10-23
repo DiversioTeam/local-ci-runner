@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/DiversioTeam/local-ci-runner/internal/agentsession"
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
 	"github.com/DiversioTeam/local-ci-runner/internal/engine"
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
@@ -44,7 +45,7 @@ func main() {
 	}
 
 	fmt.Fprintln(os.Stderr, "local-ci:", runError)
-	if errors.Is(runError, errRunFailed) {
+	if errors.Is(runError, errRunFailed) || errors.Is(runError, errAgentSessionFailed) {
 		os.Exit(1)
 	}
 	os.Exit(2)
@@ -252,6 +253,8 @@ func (c *cli) runWithContext(commandContext context.Context, forceStop <-chan st
 			return nil
 		}
 		return c.logsCommand(commandContext, args[1:])
+	case agentsession.Subcommand:
+		return c.agentSessionCheckCommand(commandContext)
 	default:
 		return fmt.Errorf("unknown command %q (run 'local-ci --help')", args[0])
 	}
@@ -825,6 +828,12 @@ func loadPlanInputs(ctx context.Context, startDirectory string, configPath strin
 		if repositoryChanged || headChanged || sourceChanged {
 			return planInputs{}, fmt.Errorf("planner changed repository identity, HEAD, or worktree snapshot; write generated files to Git-ignored paths and retry")
 		}
+	}
+
+	// The opt-in agent-session check joins the plan as one more black-box step, after planner or static steps.
+	if configuration.AgentSession {
+		inputs.plan.Steps = append(inputs.plan.Steps, agentSessionStep())
+		inputs.plan.ApplyDefaults()
 	}
 
 	identity, err := engine.BuildRunIdentity(repository.Root, repository.RepoSlug, repository.HeadSHA, configFilePath, inputs.plan)

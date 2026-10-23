@@ -981,6 +981,11 @@ Config rules:
 - Default context is `local/<step-id>`; aggregate defaults to `local/verify`. The run alone posts its aggregate context, even if a step uses that name. Steps may share a context: it passes only when all matching steps passed or were skipped; failures/errors cannot be overwritten by sibling success. Publication combines each unique context once.
 - `env` maps strings to strings. Commands are argv, not shell text: there is no
   implicit variable expansion or piping. Choose an explicit shell if needed.
+- Top-level `agent_session = true` adds the built-in `agent-session` step
+  (`local/agent-session`): HEAD must be covered by a published agent session
+  transcript linked from the open PR (or a `No agent session: <reason>` line).
+  Failures start with `agent-session: missing|stale|unlinked` and print the exact
+  `fix:` command. Run it directly with `local-ci agent-session-check`.
 
 ### Safe parallel execution
 
