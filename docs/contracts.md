@@ -70,6 +70,29 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 - on resume after `snapshot_changed` or a snapshot attempt without a verified matching tree (including interruption), reruns every step instead of reusing unverified results, even when `--from-step` selects a later step; legacy/live-worktree attempts retain their existing behavior
 - cancellation during snapshot creation records a finished, interrupted run and the signal exit code, just like cancellation during a step
 
+### Result reuse
+
+A clean `run` reuses an earlier run instead of executing when that run:
+- finished with summary `success`, with no `snapshot_error`, and was not itself reused;
+- has `tested_tree_hash` equal to the current worktree tree;
+- has the same repo slug, `config_hash` and `plan_hash`.
+
+It is found through a per-user index, one JSON file per key, written atomically after each qualifying run:
+`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>.json`.
+Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `plan_hash` and `finished_at`.
+
+The reusing run:
+- is a normal run directory whose `meta.json` has `reused_from` (`run_id`, `run_dir`, `head_sha`);
+- copies each step's terminal state and exit code;
+- posts each context and the aggregate with the description `reused: run <id> on <sha12> (same tree)`;
+- copies each step's `output.env`, so a downstream-only resume can still consume its producer's outputs;
+- retains source run/SHA in terminal descriptions on delayed publication, including after posting failures;
+- removes dead runners' snapshots even when the new run is a cache hit.
+
+`reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
+
+An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` always execute.
+
 ## 2. Planner stdout
 
 If a planner is configured, stdout must be exactly one JSON object. Unknown fields and trailing data are rejected, as in static config, so a misspelled `needs` cannot silently drop an ordering edge:
@@ -186,6 +209,7 @@ Stores immutable run identity and the trust snapshot for that run:
 - `snapshot_dir`: where the latest attempt's steps ran (removed afterwards)
 - `tested_tree_hash`: the tree the whole run was verified against, when it ran in a snapshot throughout
 - `snapshot_error`: why the snapshot stopped holding its tree; the run status is then `snapshot_changed`
+- `reused_from`: the run whose result this run reused instead of executing
 
 Known suppression reasons are `dirty_worktree`, `cli_disabled`, and `post_failed`.
 

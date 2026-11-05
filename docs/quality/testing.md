@@ -43,6 +43,9 @@ something different, such as wiring, but not repeat the same contract.
 | Repo identity and worktree snapshot | `internal/gitrepo` | Real `git` repositories, no mocks |
 | Run snapshot: checkout of the captured tree, seeding, verification, removal | `internal/snapshot` | `Create`/`Verify`/`Remove` on real `git` repositories |
 | Steps run in the snapshot; `tested_tree_hash`, `snapshot_changed`, cleanup on failure and interrupt | `internal/engine` | `ExecuteRun` with `SnapshotOptions` on a real `git` repository |
+| Reuse eligibility and the reused run's statuses | `internal/engine` | `CheckReusable` table; `ReuseRun` from a real snapshot run |
+| Result index paths, atomic records, key mismatch | `internal/resultcache` | Real files under a temp root |
+| When `run` reuses and when it falls back | `cmd/local-ci` | `run` twice in real repositories |
 | Self-update and Homebrew handoff | `internal/update` | A local `httptest` server, a real symlink into a `Cellar`, a fake `brew` on `PATH` |
 
 ## Patterns that keep tests deterministic

@@ -20,8 +20,9 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 )
 
-// TestMain keeps tests away from the developer's machine: git ignores global config, and a
-// gh that always fails shadows the real one, so a broken guard can never post a real status.
+// TestMain keeps tests away from the developer's machine: git ignores global config, a gh
+// that always fails shadows the real one, so a broken guard can never post a real status,
+// and the result index lives in a throwaway cache.
 func TestMain(m *testing.M) {
 	os.Exit(runIsolated(m))
 }
@@ -38,6 +39,14 @@ func runIsolated(m *testing.M) int {
 	os.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	// The result index lives in the user cache; keep it out of the developer's.
+	cacheHome, err := os.MkdirTemp("", "local-ci-cache-")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(cacheHome)
+	os.Setenv("HOME", cacheHome)
+	os.Setenv("XDG_CACHE_HOME", cacheHome)
 	return m.Run()
 }
 
@@ -533,7 +542,8 @@ func newGitRepo(t *testing.T) string {
 	runGit(t, repoRoot, "init")
 	runGit(t, repoRoot, "config", "user.email", "local-ci@example.com")
 	runGit(t, repoRoot, "config", "user.name", "Local CI")
-	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("hello\n"))
+	// A distinct tree per test, so no test reuses another test's result.
+	writeFile(t, filepath.Join(repoRoot, "README.md"), []byte("hello from "+t.Name()+"\n"))
 	runGit(t, repoRoot, "add", "README.md")
 	runGit(t, repoRoot, "commit", "-m", "init")
 	runGit(t, repoRoot, "remote", "add", "origin", "git@github.com:owner/repo.git")

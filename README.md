@@ -116,6 +116,8 @@ It:
 - optionally asks a repo-owned planner for a resolved plan
 - executes black-box steps in an immutable snapshot of the captured tree, so
   edits, checkouts and commits during a run cannot change what was tested
+- reuses a passing result for a tree it already checked, on any branch or
+  worktree, instead of running the checks again
 - writes run artifacts under `.local-ci/runs/<run-id>/`
 - optionally posts GitHub commit statuses for the verified snapshot
 
