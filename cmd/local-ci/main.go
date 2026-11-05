@@ -327,6 +327,7 @@ func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct
 		return err
 	}
 
+	c.removeStaleSnapshots(inputs)
 	if source, ok := c.findReusableRun(inputs, runRecord, opts); ok {
 		reused, err := engine.ReuseRun(commandContext, inputs.store, runRecord, source, engine.ReuseOptions{
 			Reporter: newReporter(inputs.configuration, opts.noGitHub),
@@ -424,6 +425,7 @@ func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan str
 	}
 	runRecord.Meta.GitHubPostingSuppressed = suppressedGitHubPostingReason(runRecord.Meta.GitHubPostingSuppressed, inputs.repository.DirtyWorktree, opts.noGitHub, inputs.configuration.GitHub.Enabled)
 	runRecord.Meta.MaxParallel = getMaxParallel(inputs.configuration, opts)
+	c.removeStaleSnapshots(inputs)
 
 	return c.executeAndReport(commandContext, forceStop, inputs, runRecord, opts)
 }
@@ -939,12 +941,6 @@ func (c *cli) executeAndReport(
 			AllowPlainCopy: inputs.configuration.Snapshot.AllowPlainCopy,
 		}
 	}
-	// A runner killed without cleanup (SIGKILL, power loss) leaves its snapshot behind.
-	if err := snapshot.RemoveStale(inputs.repository.Root, func(runID string) bool {
-		return isRunActive(inputs.store, runID)
-	}); err != nil {
-		_, _ = fmt.Fprintf(c.stderr, "warning: %v\n", err)
-	}
 	if !opts.json {
 		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
 	}
@@ -954,6 +950,15 @@ func (c *cli) executeAndReport(
 	}
 	c.recordResult(executed)
 	return c.reportRun(commandContext, inputs, executed, opts)
+}
+
+func (c *cli) removeStaleSnapshots(inputs planInputs) {
+	// Cache hits must also clean up snapshots left by dead runners.
+	if err := snapshot.RemoveStale(inputs.repository.Root, func(runID string) bool {
+		return isRunActive(inputs.store, runID)
+	}); err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "warning: %v\n", err)
+	}
 }
 
 func (c *cli) reportRun(commandContext context.Context, inputs planInputs, executed engine.RunRecord, opts executionCLIOptions) error {
@@ -967,7 +972,7 @@ func (c *cli) reportRun(commandContext context.Context, inputs planInputs, execu
 		_, _ = fmt.Fprintf(c.stdout, "repo: %s @ %s\n", inputs.repository.RepoSlug, inputs.repository.HeadSHA)
 		_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", executed.RunDir)
 		if from := executed.Meta.ReusedFrom; from != nil {
-			_, _ = fmt.Fprintf(c.stdout, "reused: run %s on %s tested this tree; no checks ran (local-ci run --no-reuse to run them)\n", from.RunID, from.HeadSHA)
+			_, _ = fmt.Fprintf(c.stdout, "reused: run %s on %s supplied the original results; see step logs for any resumed checks\n", from.RunID, from.HeadSHA)
 		}
 		switch executed.Meta.GitHubPostingSuppressed {
 		case "dirty_worktree":

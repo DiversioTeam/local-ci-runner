@@ -70,7 +70,7 @@ func ReuseRun(ctx context.Context, store persistence.Store, run RunRecord, sourc
 		return RunRecord{}, err
 	}
 	now := resolveNow(opts.Now)
-	description := fmt.Sprintf("reused: run %s on %s (same tree)", source.RunID, shortSHA(source.Meta.HeadSHA))
+	description := buildReuseDescription(persistence.ReusedFrom{RunID: source.RunID, HeadSHA: source.Meta.HeadSHA})
 
 	startedAt := now()
 	run.Meta.StartedAt = &startedAt
@@ -93,6 +93,13 @@ func ReuseRun(ctx context.Context, store persistence.Store, run RunRecord, sourc
 		sourceStatus := source.StepStatuses[stepIndex]
 		note := fmt.Sprintf("%s\nlogs: %s\n", description, storeStepFile(source.RunDir, stepIndex, status.StepID, persistence.CombinedLog))
 		if err := resetStepArtifacts(store, run.RunID, stepIndex, status.StepID); err != nil {
+			return RunRecord{}, err
+		}
+		output, err := os.ReadFile(storeStepFile(source.RunDir, stepIndex, status.StepID, persistence.OutputEnv))
+		if err != nil {
+			return RunRecord{}, fmt.Errorf("read reused step %s outputs: %w", status.StepID, err)
+		}
+		if err := persistence.WriteTextFile(store.StepFile(run.RunID, stepIndex, status.StepID, persistence.OutputEnv), string(output)); err != nil {
 			return RunRecord{}, err
 		}
 		if err := persistence.WriteTextFile(store.StepFile(run.RunID, stepIndex, status.StepID, persistence.CombinedLog), note); err != nil {
@@ -159,6 +166,10 @@ func postReusedStatus(ctx context.Context, reporter ghstatus.Reporter, appender 
 		return nil
 	}
 	return postGitHubStatus(ctx, reporter, appender, meta, stepID, status)
+}
+
+func buildReuseDescription(source persistence.ReusedFrom) string {
+	return fmt.Sprintf("reused: run %s on %s (same tree)", source.RunID, shortSHA(source.HeadSHA))
 }
 
 func shortSHA(sha string) string {

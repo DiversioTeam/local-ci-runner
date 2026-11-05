@@ -82,6 +82,9 @@ func postAggregateStatus(
 		State:       state,
 		Description: aggregateDescription(state),
 	}
+	if meta.ReusedFrom != nil && state != ghstatus.StatePending {
+		status.Description += "; " + buildReuseDescription(*meta.ReusedFrom)
+	}
 	if meta.SnapshotError != "" && state == ghstatus.StateError {
 		status.Description = aggregateDescriptionSnapshotChanged
 	}
@@ -122,6 +125,9 @@ func postStepTerminalStatus(
 		Context:     status.GitHubContext,
 		State:       stepGitHubState(status.State),
 		Description: stepDescription(status.State),
+	}
+	if meta.ReusedFrom != nil {
+		githubStatus.Description += "; " + buildReuseDescription(*meta.ReusedFrom)
 	}
 	return postGitHubStatus(ctx, reporter, appender, meta, status.StepID, githubStatus)
 }

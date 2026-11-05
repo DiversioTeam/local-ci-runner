@@ -46,30 +46,78 @@ func TestCleanupKeepsSnapshotClaimedByAResumingRunner(t *testing.T) {
 // A runner killed with SIGKILL cannot remove its snapshot; the next run must.
 func TestRunRemovesSnapshotsLeftByDeadRunners(t *testing.T) {
 	t.Parallel()
-	root := newGitRepo(t)
-	writeFile(t, filepath.Join(root, ".local-ci.toml"), []byte("version = 1\n[[steps]]\nid = 'ok'\ncommand = ['true']\n"))
-	captured, err := gitrepo.CaptureTree(t.Context(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	orphan, err := snapshot.Create(t.Context(), snapshot.Options{RepoRoot: root, RunID: "20260101T000000Z-0badc0de", HeadSHA: captured.HeadSHA, TreeHash: captured.WorktreeTreeHash})
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, mode := range []string{"execute", "reuse"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			root := newGitRepo(t)
+			writeFile(t, filepath.Join(root, ".local-ci.toml"), []byte("version = 1\n[[steps]]\nid = 'ok'\ncommand = ['true']\n"))
+			runGit(t, root, "add", ".local-ci.toml")
+			runGit(t, root, "commit", "-m", "config")
+			if mode == "reuse" {
+				var stdout, stderr bytes.Buffer
+				if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"run", "--no-github"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			captured, err := gitrepo.CaptureTree(t.Context(), root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			orphan, err := snapshot.Create(t.Context(), snapshot.Options{RepoRoot: root, RunID: "20260101T000000Z-0badc0de", HeadSHA: captured.HeadSHA, TreeHash: captured.WorktreeTreeHash})
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	var stdout, stderr bytes.Buffer
-	if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"run", "--no-github"}); err != nil {
-		t.Fatalf("run: %v\n%s", err, stderr.String())
+			var stdout, stderr bytes.Buffer
+			if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"run", "--no-github"}); err != nil {
+				t.Fatalf("run: %v\n%s", err, stderr.String())
+			}
+			if mode == "reuse" && !strings.Contains(stdout.String(), "reused:") {
+				t.Fatalf("expected cache hit: %s", stdout.String())
+			}
+			entries, err := os.ReadDir(filepath.Join(root, snapshot.Dir))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("snapshots left after the run: %v (orphan was %s)", entries, orphan.Dir)
+			}
+			if worktrees := gitOutput(t, root, "worktree", "list", "--porcelain"); bytes.Contains([]byte(worktrees), []byte(snapshot.Dir)) {
+				t.Fatalf("snapshot worktrees still registered:\n%s", worktrees)
+			}
+		})
 	}
-	entries, err := os.ReadDir(filepath.Join(root, snapshot.Dir))
-	if err != nil {
+}
+
+func TestResumedReuseReportsExecutionWithoutClaimingNoChecksRan(t *testing.T) {
+	t.Parallel()
+	root := newGitRepo(t)
+	writeFile(t, filepath.Join(root, ".local-ci.toml"), []byte("version = 1\n[[steps]]\nid = 'check'\ncommand = ['sh', '-c', 'printf x >> \"$LOCAL_CI_SOURCE_ROOT/.local-ci/executions\"']\n"))
+	runGit(t, root, "add", ".local-ci.toml")
+	runGit(t, root, "commit", "-m", "config")
+	var reused showJSON
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &reused); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if reused.Meta.ReusedFrom == nil {
+		t.Fatal("second run did not reuse")
+	}
+	var stdout, stderr bytes.Buffer
+	if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, []string{"resume", reused.RunID, "--from-step", "check", "--no-github"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("snapshots left after the run: %v (orphan was %s)", entries, orphan.Dir)
+	executions, err := os.ReadFile(filepath.Join(root, ".local-ci", "executions"))
+	if err != nil || string(executions) != "xx" {
+		t.Fatalf("executions = %q, %v", executions, err)
 	}
-	if worktrees := gitOutput(t, root, "worktree", "list", "--porcelain"); bytes.Contains([]byte(worktrees), []byte(snapshot.Dir)) {
-		t.Fatalf("snapshot worktrees still registered:\n%s", worktrees)
+	if strings.Contains(stdout.String(), "no checks ran") {
+		t.Fatalf("resume falsely claimed no execution: %s", stdout.String())
 	}
 }
 

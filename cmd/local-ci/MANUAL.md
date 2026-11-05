@@ -222,7 +222,10 @@ The earlier run must have:
 The new run executes nothing. It records `reused_from` and copies each step's
 outcome. It posts every context and the aggregate to the new HEAD, described as
 `reused: run <id> on <sha12> (same tree)`. Its step `combined.log` points at
-the original run's log.
+the original run's log. Each step's `output.env` is copied too, so a later
+`resume --from-step` can consume outputs from a successful prerequisite.
+Delayed publication includes the source run and SHA in terminal descriptions.
+Cache hits also clean up snapshots left by dead runners.
 
 The index lives in the user cache, at
 `<UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tree>/<config_hash>-<plan_hash>.json`.
@@ -235,7 +238,9 @@ A run still executes in these cases:
 - the worktree is dirty, or `[snapshot] disabled` is set.
 - you pass `local-ci run --no-reuse`.
 
-`resume` never reuses. A plan whose env changes with the branch (for example a
+`resume` never takes a cache hit, but can retain successful prerequisite steps.
+The original `reused_from` stays as history; consult step logs for resumed checks.
+A plan whose env changes with the branch (for example a
 diff base) has a different plan hash, so it does not match. Repositories that
 want reuse across branches keep their plan env branch-independent.
 

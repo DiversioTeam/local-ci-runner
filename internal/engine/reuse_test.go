@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -13,7 +14,7 @@ import (
 
 // newReusePair runs a plan once in a snapshot (the source) and prepares a second run of the same
 // tree, config, and plan in the same store (the candidate).
-func newReusePair(t *testing.T, plan config.ResolvedPlan, githubConfig config.GitHub) (persistence.Store, RunRecord, RunRecord) {
+func newReusePair(t *testing.T, plan config.ResolvedPlan, githubConfig config.GitHub, suppressed string) (persistence.Store, RunRecord, RunRecord) {
 	t.Helper()
 	_, store, run := newSnapshotRun(t, plan, config.GitHub{}, "")
 	source, err := ExecuteRun(t.Context(), store, run, ExecuteOptions{Snapshot: &SnapshotOptions{}})
@@ -25,12 +26,13 @@ func newReusePair(t *testing.T, plan config.ResolvedPlan, githubConfig config.Gi
 		githubConfig.AggregateContext = config.DefaultAggregateContext
 	}
 	candidate, err := PrepareRun(store, PrepareOptions{
-		Identity:         identity,
-		Plan:             source.Plan,
-		GitHub:           githubConfig,
-		HeadTreeHash:     run.Meta.WorktreeTreeHash,
-		WorktreeTreeHash: run.Meta.WorktreeTreeHash,
-		Random:           bytes.NewReader([]byte{0xca, 0xfe, 0xba, 0xbe}),
+		Identity:                identity,
+		Plan:                    source.Plan,
+		GitHub:                  githubConfig,
+		GitHubPostingSuppressed: suppressed,
+		HeadTreeHash:            run.Meta.WorktreeTreeHash,
+		WorktreeTreeHash:        run.Meta.WorktreeTreeHash,
+		Random:                  bytes.NewReader([]byte{0xca, 0xfe, 0xba, 0xbe}),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -38,10 +40,74 @@ func newReusePair(t *testing.T, plan config.ResolvedPlan, githubConfig config.Gi
 	return store, source, candidate
 }
 
+func TestReusePreservesProducerOutputsForDownstreamResume(t *testing.T) {
+	t.Parallel()
+	plan := config.ResolvedPlan{Steps: []config.Step{
+		{ID: "produce", Command: []string{"/bin/sh", "-c", `printf 'VALUE=ready\n' > "$LOCAL_CI_STEP_OUTPUT"`}},
+		{ID: "consume", Needs: []string{"produce"}, Command: []string{"/bin/sh", "-c", `. "$LOCAL_CI_RUN_DIR/steps/001-produce/output.env"; test "$VALUE" = ready`}},
+	}}
+	store, source, candidate := newReusePair(t, plan, config.GitHub{}, "")
+	reused, err := ReuseRun(t.Context(), store, candidate, source, ReuseOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadRun(store, reused.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := ExecuteRun(t.Context(), store, loaded, ExecuteOptions{FromStep: "consume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Summary.Status != string(StepStateSuccess) {
+		t.Fatalf("downstream resume lost the producer output: %s", resumed.Summary.Status)
+	}
+}
+
+func TestPublishReusedRunPreservesSourceDescriptions(t *testing.T) {
+	t.Parallel()
+	for _, suppression := range []string{"cli_disabled", "post_failed"} {
+		t.Run(suppression, func(t *testing.T) {
+			t.Parallel()
+			suppressed := suppression
+			reporter := &fakeReporter{}
+			if suppression == "post_failed" {
+				suppressed = ""
+				reporter.postError = errors.New("offline")
+			}
+			plan := config.ResolvedPlan{Steps: []config.Step{{ID: "check", Command: []string{"true"}}}}
+			store, source, candidate := newReusePair(t, plan, config.GitHub{Enabled: true}, suppressed)
+			reused, err := ReuseRun(t.Context(), store, candidate, source, ReuseOptions{Reporter: reporter})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadRun(store, reused.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Meta.GitHubPostingSuppressed != suppression {
+				t.Fatalf("suppression = %q", loaded.Meta.GitHubPostingSuppressed)
+			}
+			published := &fakeReporter{}
+			if err := PublishCompletedRun(t.Context(), store, loaded, PublishOptions{Reporter: published, TargetSHA: candidate.Meta.HeadSHA}); err != nil {
+				t.Fatal(err)
+			}
+			if len(published.posts) != 2 {
+				t.Fatalf("published posts = %v", published.posts)
+			}
+			for _, post := range published.posts {
+				if !strings.Contains(post.status.Description, source.RunID) || !strings.Contains(post.status.Description, source.Meta.HeadSHA[:12]) {
+					t.Fatalf("publication lost source run/SHA: %+v", post.status)
+				}
+			}
+		})
+	}
+}
+
 func TestCheckReusableRequiresTheSameProvenResult(t *testing.T) {
 	t.Parallel()
 	plan := config.ResolvedPlan{Steps: []config.Step{{ID: "check", Command: []string{"/bin/sh", "-c", "exit 0"}}}}
-	_, source, candidate := newReusePair(t, plan, config.GitHub{})
+	_, source, candidate := newReusePair(t, plan, config.GitHub{}, "")
 	for _, testCase := range []struct {
 		name   string
 		mutate func(source *RunRecord, candidate *RunRecord)
@@ -83,7 +149,7 @@ func TestReuseRunPostsTheSourceResultWithoutExecuting(t *testing.T) {
 		{ID: "check", Command: []string{"/bin/sh", "-c", `printf ran >> "$LOCAL_CI_SOURCE_ROOT/executions"`}},
 		{ID: "off", If: "false", Command: []string{"/bin/sh", "-c", "exit 1"}},
 	}}
-	store, source, candidate := newReusePair(t, plan, config.GitHub{Enabled: true})
+	store, source, candidate := newReusePair(t, plan, config.GitHub{Enabled: true}, "")
 	reporter := &fakeReporter{}
 
 	reused, err := ReuseRun(t.Context(), store, candidate, source, ReuseOptions{Reporter: reporter})

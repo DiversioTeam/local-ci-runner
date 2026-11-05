@@ -83,7 +83,12 @@ Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_
 The reusing run:
 - is a normal run directory whose `meta.json` has `reused_from` (`run_id`, `run_dir`, `head_sha`);
 - copies each step's terminal state and exit code;
-- posts each context and the aggregate with the description `reused: run <id> on <sha12> (same tree)`.
+- posts each context and the aggregate with the description `reused: run <id> on <sha12> (same tree)`;
+- copies each step's `output.env`, so a downstream-only resume can still consume its producer's outputs;
+- retains source run/SHA in terminal descriptions on delayed publication, including after posting failures;
+- removes dead runners' snapshots even when the new run is a cache hit.
+
+`reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
 
 An entry whose run is missing, fails to load, or no longer qualifies is removed, and the checks run. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` always execute.
 
