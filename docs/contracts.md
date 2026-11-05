@@ -51,7 +51,7 @@ env = { MODE = "fast" }
 - A resolved planner plan may contain zero steps when there is nothing to run.
 - `id` must be unique.
 - `command` is always an argv array, not a shell string.
-- `dir` is repo-root relative unless absolute.
+- `dir` is repo-root relative unless absolute. With snapshots enabled, absolute paths inside the source repo map to the snapshot; paths escaping it (including through symlinks) are refused before the command starts.
 - `needs` is a small DAG only. Successful and skipped dependencies satisfy it; failed or blocked dependencies block dependents. Independent branches continue after check failures.
 - Steps become ready only after all dependencies are complete, including reused successes. Ties follow the same stable topological order used by serial execution. Completion order may vary.
 - Consumer repos must order steps sharing databases, generated files, build directories, or other mutable resources; missing dependency edges are not proof of resource independence.
@@ -63,10 +63,11 @@ env = { MODE = "fast" }
 
 Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that holds exactly the captured tree (`worktree_tree_hash`: HEAD plus dirty changes). The runner:
 - creates it before the first step, after the planner, and refuses to start if it cannot prove the snapshot holds that tree
-- clones `seed` paths into it with `clonefile(2)` (macOS APFS, one call per path) or `cp --reflink=always` (Linux), never symlinks; either fails rather than silently copying
+- clones `seed` paths into it with `clonefile(2)` (macOS APFS, one call per path) or `cp --reflink=always` (Linux); copied symlinks into live source or with unreadable targets are refused, while snapshot-local links and external tool links are allowed
 - checks the snapshot's HEAD and tree before each step and before the final aggregate status; a mismatch blocks remaining steps and finishes the run as `snapshot_changed` with an `error` aggregate, and the run cannot be published
 - removes it on every exit (success, failure, interrupt, fatal error), and at the start of `run`/`resume` removes snapshots whose runner is gone
 - records `tested_tree_hash` only when the whole run executed in a snapshot that held that tree throughout; successes reused by `resume` count only if the earlier attempt also recorded that tree
+- on resume after `snapshot_changed`, reruns every step instead of reusing invalid results, even when `--from-step` selects a later step
 
 ## 2. Planner stdout
 

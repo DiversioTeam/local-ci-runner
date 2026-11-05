@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -168,7 +169,7 @@ func seed(ctx context.Context, opts Options, dir string, path string) error {
 	}
 	cloneError := cloneTree(ctx, source, target)
 	if cloneError == nil {
-		return nil
+		return validateSeedLinks(opts.RepoRoot, dir, target)
 	}
 	if err := os.RemoveAll(target); err != nil {
 		return fmt.Errorf("snapshot.seed %q: remove partial clone: %w", path, err)
@@ -182,7 +183,38 @@ func seed(ctx context.Context, opts Options, dir string, path string) error {
 		return fmt.Errorf("snapshot.seed %q: copy: %w", path, err)
 	}
 	warn(opts.Warn, "snapshot: copied %s without copy-on-write (%v)", path, cloneError)
-	return nil
+	return validateSeedLinks(opts.RepoRoot, dir, target)
+}
+
+// Copy-on-write preserves symlinks; links must not lend a snapshot access to live source.
+func validateSeedLinks(repoRoot string, snapshotDir string, seedPath string) error {
+	sourceRoot, err := filepath.EvalSymlinks(repoRoot)
+	if err != nil {
+		return err
+	}
+	snapshotRoot, err := filepath.EvalSymlinks(snapshotDir)
+	if err != nil {
+		return err
+	}
+	return filepath.WalkDir(seedPath, func(path string, entry fs.DirEntry, walkError error) error {
+		if walkError != nil {
+			return walkError
+		}
+		if entry.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("seed symlink %q cannot be checked: %w", path, err)
+		}
+		if target == snapshotRoot || strings.HasPrefix(target, snapshotRoot+string(filepath.Separator)) {
+			return nil
+		}
+		if target == sourceRoot || strings.HasPrefix(target, sourceRoot+string(filepath.Separator)) {
+			return fmt.Errorf("seed symlink %q points into the live worktree", path)
+		}
+		return nil
+	})
 }
 
 func warn(writer io.Writer, format string, args ...any) {

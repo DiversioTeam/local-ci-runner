@@ -1232,8 +1232,12 @@ func isRunActive(store persistence.Store, runID string) bool {
 	if err != nil {
 		return false
 	}
-	alive := getRunnerAlive(meta)
-	return alive != nil && *alive
+	// A resume claims its PID before clearing the previous attempt's finish time.
+	if meta.RunnerPID == nil || *meta.RunnerPID <= 0 {
+		return false
+	}
+	alive, known := getProcessAlive(*meta.RunnerPID)
+	return !known || alive
 }
 
 func getRunnerAlive(meta persistence.Meta) *bool {

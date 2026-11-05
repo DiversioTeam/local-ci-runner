@@ -83,6 +83,12 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		}
 		run.StepStatuses = statuses
 	}
+	// A changed snapshot invalidates every result, including successes outside --from-step.
+	if run.Meta.SnapshotError != "" {
+		for index := range run.StepStatuses {
+			run.StepStatuses[index].State = string(StepStateStale)
+		}
+	}
 	order, err := executionOrder(run.Plan)
 	if err != nil {
 		return RunRecord{}, err
@@ -322,8 +328,12 @@ func runProcess(ctx context.Context, forceStop <-chan struct{}, store persistenc
 		logWriteErrorOnce.Do(func() { firstLogWriteError = writeError })
 		cancelCommand()
 	}
+	stepDirectory, err := getStepDirectory(run.Meta, step.Dir)
+	if err != nil {
+		return err, nil, err.Error()
+	}
 	cmd := exec.CommandContext(commandContext, step.Command[0], step.Command[1:]...)
-	cmd.Dir = resolveStepDir(executionRoot(run.Meta), step.Dir)
+	cmd.Dir = stepDirectory
 	cmd.Env = stepEnv(run, stepIndex, step)
 	stdoutLog := stepLogWriter{file: stdoutFile, addWriteError: addLogWriteError}
 	stderrLog := stepLogWriter{file: stderrFile, addWriteError: addLogWriteError}
@@ -547,11 +557,44 @@ func executionRoot(meta persistence.Meta) string {
 	return meta.RepoRoot
 }
 
-func resolveStepDir(repoRoot string, dir string) string {
-	if filepath.IsAbs(dir) {
-		return dir
+func getStepDirectory(meta persistence.Meta, directory string) (string, error) {
+	if meta.SnapshotDir == "" {
+		if filepath.IsAbs(directory) {
+			return directory, nil
+		}
+		return filepath.Join(meta.RepoRoot, directory), nil
 	}
-	return filepath.Join(repoRoot, dir)
+	if filepath.IsAbs(directory) {
+		sourceRoot, err := filepath.EvalSymlinks(meta.RepoRoot)
+		if err != nil {
+			return "", err
+		}
+		sourceDirectory, err := filepath.EvalSymlinks(directory)
+		if err != nil {
+			return "", err
+		}
+		directory, err = filepath.Rel(sourceRoot, sourceDirectory)
+		if err != nil {
+			return "", err
+		}
+	}
+	directory = filepath.Clean(directory)
+	if directory == ".." || strings.HasPrefix(directory, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("step directory %q is outside snapshot", directory)
+	}
+	snapshotRoot, err := filepath.EvalSymlinks(meta.SnapshotDir)
+	if err != nil {
+		return "", err
+	}
+	stepDirectory, err := filepath.EvalSymlinks(filepath.Join(snapshotRoot, directory))
+	if err != nil {
+		return "", err
+	}
+	relativeDirectory, err := filepath.Rel(snapshotRoot, stepDirectory)
+	if err != nil || relativeDirectory == ".." || strings.HasPrefix(relativeDirectory, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("step directory %q is outside snapshot", directory)
+	}
+	return stepDirectory, nil
 }
 
 func stepEnv(run RunRecord, stepIndex int, step config.Step) []string {
