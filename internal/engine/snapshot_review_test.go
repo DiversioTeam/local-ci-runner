@@ -54,7 +54,7 @@ func TestResumeRerunsSuccessesFromAnInvalidSnapshot(t *testing.T) {
 
 func TestSnapshotStepDirectoriesCannotReachTheLiveWorktree(t *testing.T) {
 	t.Parallel()
-	for _, directoryKind := range []string{"relative", "absolute source", "absolute outside", "relative escape", "symlink escape"} {
+	for _, directoryKind := range []string{"relative", "absolute source", "absolute source alias", "absolute outside", "relative escape", "symlink escape", "retargeted live link"} {
 		t.Run(directoryKind, func(t *testing.T) {
 			t.Parallel()
 			plan := config.ResolvedPlan{Steps: []config.Step{{ID: "check", Command: []string{"/bin/sh", "-c", `printf x > "$LOCAL_CI_STEP_DIR/ran"; cat app.txt > "$LOCAL_CI_STEP_DIR/seen"`}}}}
@@ -66,6 +66,39 @@ func TestSnapshotStepDirectoriesCannotReachTheLiveWorktree(t *testing.T) {
 				run.Plan.Steps[0].Dir = "."
 			case "absolute source":
 				run.Plan.Steps[0].Dir = root
+			case "absolute source alias":
+				canonicalRoot, err := filepath.EvalSymlinks(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				run.Plan.Steps[0].Dir = canonicalRoot
+			case "retargeted live link":
+				for _, directory := range []string{"failing", "passing"} {
+					if err := os.Mkdir(filepath.Join(root, directory), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				writeFile(t, filepath.Join(root, "failing", "check.sh"), []byte("exit 1\n"))
+				writeFile(t, filepath.Join(root, "passing", "check.sh"), []byte("exit 0\n"))
+				selected := filepath.Join(root, "selected")
+				if err := os.Symlink("failing", selected); err != nil {
+					t.Fatal(err)
+				}
+				gitInDir(t, root, "add", "failing", "passing", "selected")
+				gitInDir(t, root, "commit", "-qm", "capture failing target")
+				captured, err := gitrepo.CaptureTree(t.Context(), root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				run.Meta.HeadSHA, run.Meta.WorktreeTreeHash = captured.HeadSHA, captured.WorktreeTreeHash
+				run.Plan.Steps[0].Dir = selected
+				run.Plan.Steps[0].Command = []string{"/bin/sh", "check.sh"}
+				if err := os.Remove(selected); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("passing", selected); err != nil {
+					t.Fatal(err)
+				}
 			case "absolute outside":
 				run.Plan.Steps[0].Dir = outside
 				wantFailure = true
@@ -93,7 +126,14 @@ func TestSnapshotStepDirectoriesCannotReachTheLiveWorktree(t *testing.T) {
 				t.Fatal(err)
 			}
 			status := executed.StepStatuses[0]
-			if wantFailure {
+			if directoryKind == "retargeted live link" {
+				if status.State != string(StepStateFailure) || status.ExitCode == nil || *status.ExitCode != 1 {
+					t.Fatalf("live link selected the wrong snapshot directory: %+v", status)
+				}
+				if executed.Meta.TestedTreeHash != run.Meta.WorktreeTreeHash {
+					t.Fatal("the captured failing check did not verify its tree")
+				}
+			} else if wantFailure {
 				if status.State != string(StepStateFailure) || !strings.Contains(status.Message, "outside snapshot") {
 					t.Fatalf("escaped directory status = %+v", status)
 				}

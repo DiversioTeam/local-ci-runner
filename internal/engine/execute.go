@@ -567,17 +567,20 @@ func getStepDirectory(meta persistence.Meta, directory string) (string, error) {
 		return filepath.Join(meta.RepoRoot, directory), nil
 	}
 	if filepath.IsAbs(directory) {
-		sourceRoot, err := filepath.EvalSymlinks(meta.RepoRoot)
+		canonicalRoot, err := filepath.EvalSymlinks(meta.RepoRoot)
 		if err != nil {
 			return "", err
 		}
-		sourceDirectory, err := filepath.EvalSymlinks(directory)
-		if err != nil {
-			return "", err
+		// Strip only the source root; descendant symlinks belong to the captured tree, not live files.
+		for _, sourceRoot := range []string{meta.RepoRoot, canonicalRoot} {
+			relativeDirectory, err := filepath.Rel(sourceRoot, directory)
+			if err == nil && relativeDirectory != ".." && !strings.HasPrefix(relativeDirectory, ".."+string(filepath.Separator)) {
+				directory = relativeDirectory
+				break
+			}
 		}
-		directory, err = filepath.Rel(sourceRoot, sourceDirectory)
-		if err != nil {
-			return "", err
+		if filepath.IsAbs(directory) {
+			return "", fmt.Errorf("step directory %q is outside snapshot", directory)
 		}
 	}
 	directory = filepath.Clean(directory)

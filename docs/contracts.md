@@ -51,7 +51,7 @@ env = { MODE = "fast" }
 - A resolved planner plan may contain zero steps when there is nothing to run.
 - `id` must be unique.
 - `command` is always an argv array, not a shell string.
-- `dir` is repo-root relative unless absolute. With snapshots enabled, absolute paths inside the source repo map to the snapshot; paths escaping it (including through symlinks) are refused before the command starts.
+- `dir` is repo-root relative unless absolute. With snapshots enabled, absolute paths inside the source repo map to the snapshot before descendant symlinks are followed, so live link edits cannot select different checks; paths escaping it (including through symlinks) are refused before the command starts.
 - `needs` is a small DAG only. Successful and skipped dependencies satisfy it; failed or blocked dependencies block dependents. Independent branches continue after check failures.
 - Steps become ready only after all dependencies are complete, including reused successes. Ties follow the same stable topological order used by serial execution. Completion order may vary.
 - Consumer repos must order steps sharing databases, generated files, build directories, or other mutable resources; missing dependency edges are not proof of resource independence.
