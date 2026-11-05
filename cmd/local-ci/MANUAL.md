@@ -179,7 +179,13 @@ Before each step and before the final status, the runner checks the snapshot
 still has its HEAD and tree. If a step changed tracked or unignored files, the
 run finishes as `snapshot_changed` (aggregate `error`, "checked code changed
 during local verification"), later steps are blocked, and the run cannot be
-published. Write generated files to Git-ignored paths.
+published. Resume reruns every step from that invalid attempt, even with
+`--from-step`, so earlier successes cannot hide the change. Write generated
+files to Git-ignored paths.
+
+Absolute step directories inside the source repo map to the snapshot. Paths
+outside it, including relative escapes and symlinks, are refused before the
+command starts.
 
 Ignored inputs (virtualenvs, `node_modules`, build caches, local env files) are
 not in the tree. List the ones your checks need under `[snapshot] seed`; they
@@ -195,8 +201,9 @@ seed = [".venv", "node_modules", ".env"]
 
 Seed paths must be Git-ignored and absent from the tree. A path the live
 worktree lacks is skipped. Without copy-on-write support a path is skipped with
-a warning unless `allow_plain_copy = true`. Never symlink into the live
-worktree: an edit there would leak into the run. Outputs steps write inside the
+a warning unless `allow_plain_copy = true`. Copied symlinks into the live
+worktree or with unreadable targets are refused: an edit there would leak into
+the run. Snapshot-local links and external tool links remain allowed. Outputs steps write inside the
 snapshot are discarded with it; keep results in `LOCAL_CI_STEP_DIR` or write to
 `LOCAL_CI_SOURCE_ROOT` deliberately. Git submodules are not checked out in a
 snapshot. The snapshot's HEAD is detached, so read the branch from your
