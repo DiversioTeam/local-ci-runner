@@ -417,6 +417,22 @@ func resultKey(meta persistence.Meta, tree string) resultcache.Key {
 	return resultcache.Key{RepoSlug: meta.RepoSlug, TestedTreeHash: tree, ConfigHash: meta.ConfigHash, ConfigLocation: resultcache.GetConfigLocation(meta.RepoRoot, meta.ConfigPath), PlanHash: meta.PlanHash}
 }
 
+// removeCachedResult skips identities that cannot have a cache entry.
+func removeCachedResult(meta persistence.Meta) error {
+	cacheRoot, err := resultcache.Root()
+	if err != nil {
+		return nil
+	}
+	cacheKey := resultKey(meta, meta.WorktreeTreeHash)
+	if _, err := resultcache.Path(cacheRoot, cacheKey); err != nil {
+		return nil
+	}
+	if err := resultcache.Forget(cacheRoot, cacheKey); err != nil {
+		return fmt.Errorf("invalidate cached result: %w", err)
+	}
+	return nil
+}
+
 func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
 	opts, runID, err := parseExecutionAndRunIDArgs(args)
 	if err != nil {
@@ -956,17 +972,14 @@ func (c *cli) executeAndReport(
 		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
 	}
 	// Evict before execution: even fatal persistence errors must not revive an older pass.
-	cacheRoot, cacheError := resultcache.Root()
-	cacheKey := resultKey(runRecord.Meta, runRecord.Meta.WorktreeTreeHash)
-	if cacheError == nil {
-		_, cacheError = resultcache.Path(cacheRoot, cacheKey)
-	}
-	if cacheError == nil {
-		if err := resultcache.Forget(cacheRoot, cacheKey); err != nil {
-			return fmt.Errorf("invalidate cached result before execution: %w", err)
-		}
+	if err := removeCachedResult(runRecord.Meta); err != nil {
+		return err
 	}
 	executed, err := engine.ExecuteRun(commandContext, inputs.store, runRecord, executionOptions)
+	// Another checkout may have cached a pass while this run was executing.
+	if err != nil || executed.Summary.Status != string(engine.StepStateSuccess) || executed.Meta.TestedTreeHash == "" {
+		err = errors.Join(err, removeCachedResult(runRecord.Meta))
+	}
 	if err != nil {
 		return err
 	}

@@ -238,7 +238,9 @@ The index lives in the user cache, at
 older, location-free entries are not reused. Before fresh execution, the runner
 removes an older cached pass for the same tree, config, location and plan, then
 writes it back atomically only after verified success. Fatal persistence errors
-cannot revive the old pass. If removing an existing valid entry fails, execution
+cannot revive the old pass. Unsuccessful or fatal completion evicts again, so a
+pass cached by another checkout while this run was active is also removed.
+If removing an existing valid entry fails, execution
 refuses rather than risk leaving a superseded success reusable.
 
 A run still executes in these cases:
