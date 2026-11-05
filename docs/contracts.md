@@ -72,7 +72,7 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 
 ### Result reuse
 
-A clean `run` reuses an earlier run instead of executing when that run:
+A clean `run` with no configured snapshot seeds reuses an earlier run instead of executing when that run:
 - finished with summary `success`, with no `snapshot_error`, and was not itself reused;
 - has `tested_tree_hash` equal to the current worktree tree;
 - has the same repo slug, `config_hash` and `plan_hash`.
@@ -91,7 +91,7 @@ The reusing run:
 
 `reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
 
-An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` always execute.
+An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, configured `snapshot.seed` paths, and `resume` bypass result reuse. Seeds always require fresh checks because their ignored contents are not part of the cache identity.
 
 ## 2. Planner stdout
 

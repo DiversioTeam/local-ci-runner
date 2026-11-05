@@ -215,7 +215,8 @@ planner's env rather than `git rev-parse --abbrev-ref HEAD`.
 ### Reusing a result: one run per tree
 
 A tree only needs checking once. When `local-ci run` starts on a clean checkout
-whose tree already passed, it reuses that result instead of running anything.
+whose tree already passed and has no configured snapshot seeds, it reuses that
+result instead of running anything.
 The earlier run must have:
 - finished with every step `success`, in a snapshot that held exactly this tree
   (`tested_tree_hash`);
@@ -240,6 +241,8 @@ A run still executes in these cases:
   step outputs, or no longer qualifies. The entry is then dropped and a fresh
   successful run repairs the index.
 - the worktree is dirty, or `[snapshot] disabled` is set.
+- `snapshot.seed` contains any paths: ignored seed contents are not in the cache
+  identity, so dependency or environment changes must run fresh checks.
 - you pass `local-ci run --no-reuse`.
 
 `resume` never takes a cache hit, but can retain successful prerequisite steps.

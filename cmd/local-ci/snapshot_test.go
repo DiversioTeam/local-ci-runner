@@ -121,6 +121,49 @@ func TestResumedReuseReportsExecutionWithoutClaimingNoChecksRan(t *testing.T) {
 	}
 }
 
+func TestChangedSeedInputsRunChecksInsteadOfReusingSuccess(t *testing.T) {
+	t.Parallel()
+	root := newGitRepo(t)
+	writeFile(t, filepath.Join(root, ".gitignore"), []byte(".local-ci/\n.env\n"))
+	writeFile(t, filepath.Join(root, ".env"), []byte("good"))
+	writeFile(t, filepath.Join(root, ".local-ci.toml"), []byte(`version = 1
+[snapshot]
+seed = ['.env']
+allow_plain_copy = true
+[[steps]]
+id = 'check'
+command = ['sh', '-c', 'printf x >> "$LOCAL_CI_SOURCE_ROOT/.local-ci/executions"; test "$(cat .env)" = good']
+`))
+	runGit(t, root, "add", ".gitignore", ".local-ci.toml")
+	runGit(t, root, "commit", "-m", "seeded check")
+	var stdout, stderr bytes.Buffer
+	command := newCLI(&stdout, &stderr, root)
+	if err := command.runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+		t.Fatalf("first run: %v\n%s", err, stderr.String())
+	}
+	var first showJSON
+	if err := json.Unmarshal(stdout.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, ".env"), []byte("bad"))
+	stdout.Reset()
+	stderr.Reset()
+	if err := command.runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != errRunFailed {
+		t.Fatalf("changed seed reused stale success: error=%v, output=%s", err, stdout.String())
+	}
+	var second showJSON
+	if err := json.Unmarshal(stdout.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second.Meta.ReusedFrom != nil || second.Meta.DirtyWorktree || second.Meta.WorktreeTreeHash != first.Meta.WorktreeTreeHash {
+		t.Fatalf("seed change must execute despite an unchanged clean tree: %+v", second.Meta)
+	}
+	executions, err := os.ReadFile(filepath.Join(root, ".local-ci", "executions"))
+	if err != nil || string(executions) != "xx" {
+		t.Fatalf("executions=%q, error=%v", executions, err)
+	}
+}
+
 func TestRunReusesAPassingResultForTheSameTreeOnAnotherCommit(t *testing.T) {
 	t.Parallel()
 	root := newGitRepo(t)

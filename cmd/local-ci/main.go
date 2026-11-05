@@ -345,7 +345,8 @@ func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct
 // same tree, configuration, and plan, from any branch or worktree of this
 // repository on this machine. Anything doubtful falls back to a real run.
 func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts executionCLIOptions) (engine.RunRecord, bool) {
-	if opts.noReuse || inputs.configuration.Snapshot.Disabled || inputs.repository.DirtyWorktree {
+	// Seed contents are not in the captured tree; they cannot share a result keyed only by that tree.
+	if opts.noReuse || inputs.configuration.Snapshot.Disabled || len(inputs.configuration.Snapshot.Seed) > 0 || inputs.repository.DirtyWorktree {
 		return engine.RunRecord{}, false
 	}
 	root, err := resultcache.Root()
@@ -1725,7 +1726,7 @@ Notes:
   - Independent steps continue after check failures; failed dependencies block dependents, skipped dependencies satisfy needs.
   - Step timeout (e.g. timeout = "10m") is a failure, not operator interruption.
   - Use local-ci plan --json to inspect the complete plan before running it.
-  - A clean checkout whose tree already passed in a snapshot, with the same config and plan, reuses that
+  - A clean checkout with no snapshot seeds whose tree already passed, with the same config and plan, reuses that
     run: no checks execute, and every context is posted to HEAD as "reused: run <id> on <sha> (same tree)".
   - No partial-plan run is supported; --max-parallel 1 changes scheduling, not coverage.
   - Runner progress lines are separate from persisted step logs.
