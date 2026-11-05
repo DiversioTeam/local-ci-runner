@@ -67,7 +67,8 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 - checks the snapshot's HEAD and tree before each step and before the final aggregate status; a mismatch blocks remaining steps and finishes the run as `snapshot_changed` with an `error` aggregate, and the run cannot be published
 - removes it on every exit (success, failure, interrupt, fatal error), and at the start of `run`/`resume` removes snapshots whose runner is gone
 - records `tested_tree_hash` only when the whole run executed in a snapshot that held that tree throughout; successes reused by `resume` count only if the earlier attempt also recorded that tree
-- on resume after `snapshot_changed`, reruns every step instead of reusing invalid results, even when `--from-step` selects a later step
+- on resume after `snapshot_changed` or a snapshot attempt without a verified matching tree (including interruption), reruns every step instead of reusing unverified results, even when `--from-step` selects a later step; legacy/live-worktree attempts retain their existing behavior
+- cancellation during snapshot creation records a finished, interrupted run and the signal exit code, just like cancellation during a step
 
 ### Result reuse
 
