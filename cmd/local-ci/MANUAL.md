@@ -216,7 +216,7 @@ planner's env rather than `git rev-parse --abbrev-ref HEAD`.
 
 A tree only needs checking once. When `local-ci run` starts on a clean checkout
 whose tree already passed and has no configured snapshot seeds, it reuses that
-result instead of running anything.
+result instead of running anything. Step directories must also be relative.
 The earlier run must have:
 - finished with every step `success`, in a snapshot that held exactly this tree
   (`tested_tree_hash`);
@@ -234,7 +234,9 @@ Cache hits also clean up snapshots left by dead runners.
 The index lives in the user cache, at
 `<UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tree>/<config_hash>-<plan_hash>.json`.
 `UserCacheDir` is `~/Library/Caches` on macOS and `$XDG_CACHE_HOME` or
-`~/.cache` on Linux. Each successful snapshot run writes its entry atomically.
+`~/.cache` on Linux. Each successful snapshot run writes its entry atomically. Fresh failed,
+interrupted, or unverified execution removes an older cached pass for the same
+tree, config and plan, so a known failure cannot revive a superseded success.
 
 A run still executes in these cases:
 - the original run directory is gone, no longer loads, has missing or unreadable
@@ -243,6 +245,8 @@ A run still executes in these cases:
 - the worktree is dirty, or `[snapshot] disabled` is set.
 - `snapshot.seed` contains any paths: ignored seed contents are not in the cache
   identity, so dependency or environment changes must run fresh checks.
+- the plan contains absolute step directories: their validity depends on the
+  destination checkout, so fresh execution must check them.
 - you pass `local-ci run --no-reuse`.
 
 `resume` never takes a cache hit, but can retain successful prerequisite steps.

@@ -354,6 +354,12 @@ func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts exec
 		_, _ = fmt.Fprintf(c.stderr, "warning: result reuse disabled: %v\n", err)
 		return engine.RunRecord{}, false
 	}
+	// Absolute directories depend on the checkout root, which is not part of the cache key.
+	for _, step := range inputs.plan.Steps {
+		if filepath.IsAbs(step.Dir) {
+			return engine.RunRecord{}, false
+		}
+	}
 	key := resultKey(run.Meta, inputs.repository.WorktreeTreeHash)
 	entry, found, err := resultcache.Lookup(root, key)
 	if err != nil {
@@ -379,13 +385,15 @@ func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts exec
 	return source, true
 }
 
-// recordResult indexes a run that may stand in for later runs of its tree.
+// recordResult replaces a cached pass, or removes it when fresh execution no longer proves success.
 func (c *cli) recordResult(run engine.RunRecord) {
-	if run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "" || run.Meta.ReusedFrom != nil || run.Meta.FinishedAt == nil {
+	if run.Meta.FinishedAt == nil {
 		return
 	}
 	root, err := resultcache.Root()
-	if err == nil {
+	if err == nil && (run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "") {
+		err = resultcache.Forget(root, resultKey(run.Meta, run.Meta.WorktreeTreeHash))
+	} else if err == nil && run.Meta.ReusedFrom == nil {
 		err = resultcache.Record(root, resultcache.Entry{
 			RepoSlug:       run.Meta.RepoSlug,
 			RepoRoot:       run.Meta.RepoRoot,
@@ -399,7 +407,7 @@ func (c *cli) recordResult(run engine.RunRecord) {
 		})
 	}
 	if err != nil {
-		_, _ = fmt.Fprintf(c.stderr, "warning: result not indexed for reuse: %v\n", err)
+		_, _ = fmt.Fprintf(c.stderr, "warning: result index not updated: %v\n", err)
 	}
 }
 
@@ -1726,8 +1734,8 @@ Notes:
   - Independent steps continue after check failures; failed dependencies block dependents, skipped dependencies satisfy needs.
   - Step timeout (e.g. timeout = "10m") is a failure, not operator interruption.
   - Use local-ci plan --json to inspect the complete plan before running it.
-  - A clean checkout with no snapshot seeds whose tree already passed, with the same config and plan, reuses that
-    run: no checks execute, and every context is posted to HEAD as "reused: run <id> on <sha> (same tree)".
+  - A clean checkout with no snapshot seeds or absolute step directories can reuse a passed tree with
+    the same config and plan. No checks execute; contexts say "reused: run <id> on <sha> (same tree)".
   - No partial-plan run is supported; --max-parallel 1 changes scheduling, not coverage.
   - Runner progress lines are separate from persisted step logs.
   - On step failure or interruption the CLI prints the exact combined log path immediately.
