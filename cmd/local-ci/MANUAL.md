@@ -212,6 +212,55 @@ snapshot are discarded with it; keep results in `LOCAL_CI_STEP_DIR` or write to
 snapshot. The snapshot's HEAD is detached, so read the branch from your
 planner's env rather than `git rev-parse --abbrev-ref HEAD`.
 
+### Reusing a result: one run per tree
+
+A tree only needs checking once. When `local-ci run` starts on a clean checkout
+whose tree already passed and has no configured snapshot seeds, it reuses that
+result instead of running anything. Step directories must also be relative.
+The earlier run must have:
+- finished with every step `success`, in a snapshot that held exactly this tree
+  (`tested_tree_hash`);
+- used the same repo-relative config location, config (`config_hash`) and plan (`plan_hash`);
+- been in this repository, on any branch, commit or worktree on this machine.
+
+The new run executes nothing. It records `reused_from` and copies each step's
+outcome. It posts every context and the aggregate to the new HEAD, described as
+`reused: run <id> on <sha12> (same tree)`. Its step `combined.log` points at
+the original run's log. Each step's `output.env` is copied too, so a later
+`resume --from-step` can consume outputs from a successful prerequisite.
+Delayed publication includes the source run and SHA in terminal descriptions.
+Cache hits also clean up snapshots left by dead runners.
+
+The index lives in the user cache, at
+`<UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tree>/<config_hash>-<plan_hash>-<config_location_hash>.json`.
+`UserCacheDir` is `~/Library/Caches` on macOS and `$XDG_CACHE_HOME` or
+`~/.cache` on Linux. The location hash is SHA-256 of the repo-relative config path;
+older, location-free entries are not reused. Before fresh execution, the runner
+removes an older cached pass for the same tree, config, location and plan, then
+writes it back atomically only after verified success. Fatal persistence errors
+cannot revive the old pass. Unsuccessful or fatal completion evicts again, so a
+pass cached by another checkout while this run was active is also removed.
+If removing an existing valid entry fails, execution
+refuses rather than risk leaving a superseded success reusable.
+
+A run still executes in these cases:
+- the original run directory is gone, no longer loads, has missing or unreadable
+  step outputs, or no longer qualifies. The entry is then dropped and a fresh
+  successful run repairs the index.
+- the worktree is dirty, or `[snapshot] disabled` is set.
+- `snapshot.seed` contains any paths: ignored seed contents are not in the cache
+  identity, so dependency or environment changes must run fresh checks.
+- the plan contains absolute step directories: their validity depends on the
+  destination checkout, so fresh execution must check them.
+- the selected config is outside the repository.
+- you pass `local-ci run --no-reuse`.
+
+`resume` never takes a cache hit, but can retain successful prerequisite steps.
+The original `reused_from` stays as history; consult step logs for resumed checks.
+A plan whose env changes with the branch (for example a
+diff base) has a different plan hash, so it does not match. Repositories that
+want reuse across branches keep their plan env branch-independent.
+
 ---
 
 ## 5. Artifact model
@@ -725,6 +774,8 @@ It includes:
 - optional `snapshot_error`: why the snapshot stopped holding its tree. Such a
   run finishes as `snapshot_changed`, posts an `error` aggregate, and cannot be
   published.
+- optional `reused_from`: `run_id`, `run_dir`, `head_sha` of the earlier run
+  whose result this run reused instead of executing (see "Reusing a result").
 
 `summary` fields: `run_id`, `status`, optional `started_at`, `finished_at`,
 `duration_millis`, `steps`, `counts`, and `metadata`. Each summary step has
