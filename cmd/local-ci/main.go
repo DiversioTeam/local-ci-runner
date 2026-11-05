@@ -361,6 +361,9 @@ func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts exec
 		}
 	}
 	key := resultKey(run.Meta, inputs.repository.WorktreeTreeHash)
+	if key.ConfigLocation == "" {
+		return engine.RunRecord{}, false
+	}
 	entry, found, err := resultcache.Lookup(root, key)
 	if err != nil {
 		_, _ = fmt.Fprintf(c.stderr, "warning: result index unreadable, running checks: %v\n", err)
@@ -385,15 +388,13 @@ func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts exec
 	return source, true
 }
 
-// recordResult replaces a cached pass, or removes it when fresh execution no longer proves success.
+// recordResult restores the cache entry only after verified success.
 func (c *cli) recordResult(run engine.RunRecord) {
-	if run.Meta.FinishedAt == nil {
+	if run.Meta.FinishedAt == nil || run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "" || run.Meta.ReusedFrom != nil || resultcache.GetConfigLocation(run.Meta.RepoRoot, run.Meta.ConfigPath) == "" {
 		return
 	}
 	root, err := resultcache.Root()
-	if err == nil && (run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "") {
-		err = resultcache.Forget(root, resultKey(run.Meta, run.Meta.WorktreeTreeHash))
-	} else if err == nil && run.Meta.ReusedFrom == nil {
+	if err == nil {
 		err = resultcache.Record(root, resultcache.Entry{
 			RepoSlug:       run.Meta.RepoSlug,
 			RepoRoot:       run.Meta.RepoRoot,
@@ -402,6 +403,7 @@ func (c *cli) recordResult(run engine.RunRecord) {
 			HeadSHA:        run.Meta.HeadSHA,
 			TestedTreeHash: run.Meta.TestedTreeHash,
 			ConfigHash:     run.Meta.ConfigHash,
+			ConfigLocation: resultcache.GetConfigLocation(run.Meta.RepoRoot, run.Meta.ConfigPath),
 			PlanHash:       run.Meta.PlanHash,
 			FinishedAt:     *run.Meta.FinishedAt,
 		})
@@ -412,7 +414,7 @@ func (c *cli) recordResult(run engine.RunRecord) {
 }
 
 func resultKey(meta persistence.Meta, tree string) resultcache.Key {
-	return resultcache.Key{RepoSlug: meta.RepoSlug, TestedTreeHash: tree, ConfigHash: meta.ConfigHash, PlanHash: meta.PlanHash}
+	return resultcache.Key{RepoSlug: meta.RepoSlug, TestedTreeHash: tree, ConfigHash: meta.ConfigHash, ConfigLocation: resultcache.GetConfigLocation(meta.RepoRoot, meta.ConfigPath), PlanHash: meta.PlanHash}
 }
 
 func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
@@ -952,6 +954,17 @@ func (c *cli) executeAndReport(
 	}
 	if !opts.json {
 		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
+	}
+	// Evict before execution: even fatal persistence errors must not revive an older pass.
+	cacheRoot, cacheError := resultcache.Root()
+	cacheKey := resultKey(runRecord.Meta, runRecord.Meta.WorktreeTreeHash)
+	if cacheError == nil {
+		_, cacheError = resultcache.Path(cacheRoot, cacheKey)
+	}
+	if cacheError == nil {
+		if err := resultcache.Forget(cacheRoot, cacheKey); err != nil {
+			return fmt.Errorf("invalidate cached result before execution: %w", err)
+		}
 	}
 	executed, err := engine.ExecuteRun(commandContext, inputs.store, runRecord, executionOptions)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -123,6 +124,13 @@ func TestCheckReusableRequiresTheSameProvenResult(t *testing.T) {
 		{name: "dirty candidate", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.DirtyWorktree = true }, want: "tested tree"},
 		{name: "other repo", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.RepoSlug = "owner/other" }, want: "belongs to"},
 		{name: "other config", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.ConfigHash = "other" }, want: "another configuration"},
+		{name: "other config location", mutate: func(_ *RunRecord, candidate *RunRecord) {
+			candidate.Meta.ConfigPath = filepath.Join(candidate.Meta.RepoRoot, "other", "ci.toml")
+		}, want: "configuration location"},
+		{name: "external config", mutate: func(source *RunRecord, candidate *RunRecord) {
+			source.Meta.ConfigPath = "/external/ci.toml"
+			candidate.Meta.ConfigPath = "/external/ci.toml"
+		}, want: "configuration location"},
 		{name: "other plan", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.PlanHash = "other" }, want: "another plan"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {

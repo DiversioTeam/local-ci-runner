@@ -220,7 +220,7 @@ result instead of running anything. Step directories must also be relative.
 The earlier run must have:
 - finished with every step `success`, in a snapshot that held exactly this tree
   (`tested_tree_hash`);
-- used the same config (`config_hash`) and plan (`plan_hash`);
+- used the same repo-relative config location, config (`config_hash`) and plan (`plan_hash`);
 - been in this repository, on any branch, commit or worktree on this machine.
 
 The new run executes nothing. It records `reused_from` and copies each step's
@@ -232,11 +232,14 @@ Delayed publication includes the source run and SHA in terminal descriptions.
 Cache hits also clean up snapshots left by dead runners.
 
 The index lives in the user cache, at
-`<UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tree>/<config_hash>-<plan_hash>.json`.
+`<UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tree>/<config_hash>-<plan_hash>-<config_location_hash>.json`.
 `UserCacheDir` is `~/Library/Caches` on macOS and `$XDG_CACHE_HOME` or
-`~/.cache` on Linux. Each successful snapshot run writes its entry atomically. Fresh failed,
-interrupted, or unverified execution removes an older cached pass for the same
-tree, config and plan, so a known failure cannot revive a superseded success.
+`~/.cache` on Linux. The location hash is SHA-256 of the repo-relative config path;
+older, location-free entries are not reused. Before fresh execution, the runner
+removes an older cached pass for the same tree, config, location and plan, then
+writes it back atomically only after verified success. Fatal persistence errors
+cannot revive the old pass. If removing an existing valid entry fails, execution
+refuses rather than risk leaving a superseded success reusable.
 
 A run still executes in these cases:
 - the original run directory is gone, no longer loads, has missing or unreadable
@@ -247,6 +250,7 @@ A run still executes in these cases:
   identity, so dependency or environment changes must run fresh checks.
 - the plan contains absolute step directories: their validity depends on the
   destination checkout, so fresh execution must check them.
+- the selected config is outside the repository.
 - you pass `local-ci run --no-reuse`.
 
 `resume` never takes a cache hit, but can retain successful prerequisite steps.

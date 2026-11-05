@@ -1,6 +1,7 @@
 package resultcache
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +14,7 @@ import (
 )
 
 // Version is the entry format. Entries with another version are ignored.
-const Version = 1
+const Version = 2
 
 // Entry points at one finished, all-success run that executed in a snapshot
 // holding TestedTreeHash.
@@ -26,6 +27,7 @@ type Entry struct {
 	HeadSHA        string    `json:"head_sha"`
 	TestedTreeHash string    `json:"tested_tree_hash"`
 	ConfigHash     string    `json:"config_hash"`
+	ConfigLocation string    `json:"config_location"`
 	PlanHash       string    `json:"plan_hash"`
 	FinishedAt     time.Time `json:"finished_at"`
 }
@@ -35,11 +37,24 @@ type Key struct {
 	RepoSlug       string
 	TestedTreeHash string
 	ConfigHash     string
+	ConfigLocation string
 	PlanHash       string
 }
 
 var hexPattern = regexp.MustCompile(`^[0-9a-f]{40,64}$`)
 var slugPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+
+// GetConfigLocation returns the repo-relative config path, or empty for external configs.
+func GetConfigLocation(repoRoot, configPath string) string {
+	if !filepath.IsAbs(repoRoot) || !filepath.IsAbs(configPath) {
+		return ""
+	}
+	location, err := filepath.Rel(repoRoot, configPath)
+	if err != nil || !filepath.IsLocal(location) {
+		return ""
+	}
+	return filepath.ToSlash(location)
+}
 
 // Root is the per-user index directory: <UserCacheDir>/local-ci-runner/results.
 func Root() (string, error) {
@@ -60,7 +75,11 @@ func Path(root string, key Key) (string, error) {
 			return "", fmt.Errorf("invalid %s %q", name, value)
 		}
 	}
-	return filepath.Join(root, filepath.FromSlash(key.RepoSlug), key.TestedTreeHash, key.ConfigHash+"-"+key.PlanHash+".json"), nil
+	if !filepath.IsLocal(key.ConfigLocation) {
+		return "", fmt.Errorf("invalid config location %q", key.ConfigLocation)
+	}
+	locationHash := sha256.Sum256([]byte(key.ConfigLocation))
+	return filepath.Join(root, filepath.FromSlash(key.RepoSlug), key.TestedTreeHash, fmt.Sprintf("%s-%s-%x.json", key.ConfigHash, key.PlanHash, locationHash)), nil
 }
 
 // Record writes the entry atomically, replacing any earlier one for its key.
@@ -108,5 +127,5 @@ func Forget(root string, key Key) error {
 }
 
 func (entry Entry) key() Key {
-	return Key{RepoSlug: entry.RepoSlug, TestedTreeHash: entry.TestedTreeHash, ConfigHash: entry.ConfigHash, PlanHash: entry.PlanHash}
+	return Key{RepoSlug: entry.RepoSlug, TestedTreeHash: entry.TestedTreeHash, ConfigHash: entry.ConfigHash, ConfigLocation: entry.ConfigLocation, PlanHash: entry.PlanHash}
 }

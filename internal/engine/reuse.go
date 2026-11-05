@@ -10,6 +10,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
+	"github.com/DiversioTeam/local-ci-runner/internal/resultcache"
 )
 
 // ReuseOptions configures posting a reused result.
@@ -26,6 +27,7 @@ type ReuseOptions struct {
 // with the same configuration and plan.
 func CheckReusable(source RunRecord, run RunRecord) error {
 	sourceMeta, meta := source.Meta, run.Meta
+	configLocation := resultcache.GetConfigLocation(meta.RepoRoot, meta.ConfigPath)
 	switch {
 	case sourceMeta.FinishedAt == nil || sourceMeta.Interrupted:
 		return fmt.Errorf("run %s did not finish", source.RunID)
@@ -41,6 +43,8 @@ func CheckReusable(source RunRecord, run RunRecord) error {
 		return fmt.Errorf("run %s tested tree %s, not %s", source.RunID, sourceMeta.TestedTreeHash, meta.WorktreeTreeHash)
 	case sourceMeta.RepoSlug != meta.RepoSlug:
 		return fmt.Errorf("run %s belongs to %s", source.RunID, sourceMeta.RepoSlug)
+	case configLocation == "" || configLocation != resultcache.GetConfigLocation(sourceMeta.RepoRoot, sourceMeta.ConfigPath):
+		return fmt.Errorf("run %s used another or external configuration location", source.RunID)
 	case sourceMeta.ConfigHash != meta.ConfigHash:
 		return fmt.Errorf("run %s used another configuration", source.RunID)
 	case sourceMeta.PlanHash != meta.PlanHash:

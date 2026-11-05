@@ -75,11 +75,11 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 A clean `run` with no configured snapshot seeds and no absolute step directories reuses an earlier run instead of executing when that run:
 - finished with summary `success`, with no `snapshot_error`, and was not itself reused;
 - has `tested_tree_hash` equal to the current worktree tree;
-- has the same repo slug, `config_hash` and `plan_hash`.
+- has the same repo slug, repo-relative config location, `config_hash` and `plan_hash`. External config paths bypass reuse.
 
 It is found through a per-user index, one JSON file per key, written atomically after each qualifying run:
-`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>.json`.
-Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `plan_hash` and `finished_at`.
+`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>-<config_location_hash>.json`.
+Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `config_location`, `plan_hash` and `finished_at`. The location hash is SHA-256 of the repo-relative config path. Version 2 entries do not reuse the older location-free index.
 
 The reusing run:
 - is a normal run directory whose `meta.json` has `reused_from` (`run_id`, `run_dir`, `head_sha`);
@@ -91,7 +91,7 @@ The reusing run:
 
 `reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
 
-An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, configured `snapshot.seed` paths, and `resume` bypass result reuse. Seeds always require fresh checks because their ignored contents are not part of the cache identity. Plans with absolute step directories also run fresh checks because directory validity depends on the destination checkout. Fresh failed, interrupted, or unverified execution removes any older cached success for the same tree/config/plan.
+An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, configured `snapshot.seed` paths, and `resume` bypass result reuse. Seeds always require fresh checks because their ignored contents are not part of the cache identity. Plans with absolute step directories also run fresh checks because directory validity depends on the destination checkout. Before fresh execution, the runner removes any older cached success for the same tree/config/location/plan and restores it only after verified success. This also covers fatal persistence errors. If an existing valid cache entry cannot be removed, execution refuses rather than leave a stale pass reusable.
 
 ## 2. Planner stdout
 
