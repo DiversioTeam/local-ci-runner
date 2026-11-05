@@ -202,6 +202,36 @@ snapshot are discarded with it; keep results in `LOCAL_CI_STEP_DIR` or write to
 snapshot. The snapshot's HEAD is detached, so read the branch from your
 planner's env rather than `git rev-parse --abbrev-ref HEAD`.
 
+### Reusing a result: one run per tree
+
+A tree only needs checking once. When `local-ci run` starts on a clean checkout
+whose tree already passed, it reuses that result instead of running anything.
+The earlier run must have:
+- finished with every step `success`, in a snapshot that held exactly this tree
+  (`tested_tree_hash`);
+- used the same config (`config_hash`) and plan (`plan_hash`);
+- been in this repository, on any branch, commit or worktree on this machine.
+
+The new run executes nothing. It records `reused_from` and copies each step's
+outcome. It posts every context and the aggregate to the new HEAD, described as
+`reused: run <id> on <sha12> (same tree)`. Its step `combined.log` points at
+the original run's log.
+
+The index lives in the user cache, at
+`<UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tree>/<config_hash>-<plan_hash>.json`.
+`UserCacheDir` is `~/Library/Caches` on macOS and `$XDG_CACHE_HOME` or
+`~/.cache` on Linux. Each successful snapshot run writes its entry atomically.
+
+A run still executes in these cases:
+- the original run directory is gone, no longer loads, or no longer qualifies.
+  The entry is then dropped.
+- the worktree is dirty, or `[snapshot] disabled` is set.
+- you pass `local-ci run --no-reuse`.
+
+`resume` never reuses. A plan whose env changes with the branch (for example a
+diff base) has a different plan hash, so it does not match. Repositories that
+want reuse across branches keep their plan env branch-independent.
+
 ---
 
 ## 5. Artifact model
@@ -715,6 +745,8 @@ It includes:
 - optional `snapshot_error`: why the snapshot stopped holding its tree. Such a
   run finishes as `snapshot_changed`, posts an `error` aggregate, and cannot be
   published.
+- optional `reused_from`: `run_id`, `run_dir`, `head_sha` of the earlier run
+  whose result this run reused instead of executing (see "Reusing a result").
 
 `summary` fields: `run_id`, `status`, optional `started_at`, `finished_at`,
 `duration_millis`, `steps`, `counts`, and `metadata`. Each summary step has

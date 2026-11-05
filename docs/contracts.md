@@ -68,6 +68,24 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 - removes it on every exit (success, failure, interrupt, fatal error), and at the start of `run`/`resume` removes snapshots whose runner is gone
 - records `tested_tree_hash` only when the whole run executed in a snapshot that held that tree throughout; successes reused by `resume` count only if the earlier attempt also recorded that tree
 
+### Result reuse
+
+A clean `run` reuses an earlier run instead of executing when that run:
+- finished with summary `success`, with no `snapshot_error`, and was not itself reused;
+- has `tested_tree_hash` equal to the current worktree tree;
+- has the same repo slug, `config_hash` and `plan_hash`.
+
+It is found through a per-user index, one JSON file per key, written atomically after each qualifying run:
+`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>.json`.
+Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `plan_hash` and `finished_at`.
+
+The reusing run:
+- is a normal run directory whose `meta.json` has `reused_from` (`run_id`, `run_dir`, `head_sha`);
+- copies each step's terminal state and exit code;
+- posts each context and the aggregate with the description `reused: run <id> on <sha12> (same tree)`.
+
+An entry whose run is missing, fails to load, or no longer qualifies is removed, and the checks run. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` always execute.
+
 ## 2. Planner stdout
 
 If a planner is configured, stdout must be exactly one JSON object. Unknown fields and trailing data are rejected, as in static config, so a misspelled `needs` cannot silently drop an ordering edge:
@@ -184,6 +202,7 @@ Stores immutable run identity and the trust snapshot for that run:
 - `snapshot_dir`: where the latest attempt's steps ran (removed afterwards)
 - `tested_tree_hash`: the tree the whole run was verified against, when it ran in a snapshot throughout
 - `snapshot_error`: why the snapshot stopped holding its tree; the run status is then `snapshot_changed`
+- `reused_from`: the run whose result this run reused instead of executing
 
 Known suppression reasons are `dirty_worktree`, `cli_disabled`, and `post_failed`.
 

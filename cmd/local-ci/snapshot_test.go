@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/DiversioTeam/local-ci-runner/internal/gitrepo"
@@ -37,5 +39,67 @@ func TestRunRemovesSnapshotsLeftByDeadRunners(t *testing.T) {
 	}
 	if worktrees := gitOutput(t, root, "worktree", "list", "--porcelain"); bytes.Contains([]byte(worktrees), []byte(snapshot.Dir)) {
 		t.Fatalf("snapshot worktrees still registered:\n%s", worktrees)
+	}
+}
+
+func TestRunReusesAPassingResultForTheSameTreeOnAnotherCommit(t *testing.T) {
+	t.Parallel()
+	root := newGitRepo(t)
+	// The step counts executions in the live repository, outside the tested tree.
+	writeFile(t, filepath.Join(root, ".local-ci.toml"), []byte("version = 1\n[[steps]]\nid = 'check'\ncommand = ['sh', '-c', 'printf x >> \"$LOCAL_CI_SOURCE_ROOT/.local-ci/executions\"']\n"))
+	runGit(t, root, "add", ".local-ci.toml")
+	runGit(t, root, "commit", "-m", "config")
+	executions := func() int {
+		content, _ := os.ReadFile(filepath.Join(root, ".local-ci", "executions"))
+		return len(content)
+	}
+	run := func(args ...string) (string, showJSON) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if err := newCLI(&stdout, &stderr, root).runWithContext(t.Context(), nil, append([]string{"run", "--no-github", "--json"}, args...)); err != nil {
+			t.Fatalf("run %v: %v\n%s", args, err, stderr.String())
+		}
+		var shown showJSON
+		if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+			t.Fatal(err)
+		}
+		return stderr.String(), shown
+	}
+
+	_, first := run()
+	if executions() != 1 || first.Meta.TestedTreeHash == "" {
+		t.Fatalf("first run: executions = %d, tested tree = %q", executions(), first.Meta.TestedTreeHash)
+	}
+	// A new commit with the same tree, as a merge commit or a branch cut from it would have.
+	runGit(t, root, "commit", "--allow-empty", "-m", "same tree")
+	_, second := run()
+	if executions() != 1 || second.Meta.ReusedFrom == nil || second.Meta.ReusedFrom.RunID != first.RunID || second.Status != "success" {
+		t.Fatalf("second run: executions = %d, reused_from = %+v, status = %s", executions(), second.Meta.ReusedFrom, second.Status)
+	}
+	if _, forced := run("--no-reuse"); executions() != 2 || forced.Meta.ReusedFrom != nil {
+		t.Fatalf("--no-reuse: executions = %d, reused_from = %+v", executions(), forced.Meta.ReusedFrom)
+	}
+
+	// The --no-reuse run replaced the original in the index, so removing the original changes nothing.
+	if err := os.RemoveAll(filepath.Join(root, ".local-ci", "runs", first.RunID)); err != nil {
+		t.Fatal(err)
+	}
+	_, latest := run()
+	if latest.Meta.ReusedFrom == nil || latest.Meta.ReusedFrom.RunID == first.RunID {
+		t.Fatalf("expected reuse of the --no-reuse run, got %+v", latest.Meta.ReusedFrom)
+	}
+	// A source run that no longer exists is dropped from the index and the checks run.
+	if err := os.RemoveAll(filepath.Join(root, ".local-ci", "runs", latest.Meta.ReusedFrom.RunID)); err != nil {
+		t.Fatal(err)
+	}
+	stderr, fallback := run()
+	if executions() != 3 || fallback.Meta.ReusedFrom != nil || !strings.Contains(stderr, "not reusing run") {
+		t.Fatalf("missing source: executions = %d, reused_from = %+v, stderr = %q", executions(), fallback.Meta.ReusedFrom, stderr)
+	}
+
+	// A dirty worktree always executes.
+	writeFile(t, filepath.Join(root, "README.md"), []byte("dirty\n"))
+	if _, dirty := run(); executions() != 4 || dirty.Meta.ReusedFrom != nil {
+		t.Fatalf("dirty: executions = %d, reused_from = %+v", executions(), dirty.Meta.ReusedFrom)
 	}
 }

@@ -14,6 +14,7 @@ The runner understands processes and files. Consumer repos own the actual verifi
 - `internal/events`: append-only event schema
 - `internal/github`: GitHub commit status reporting
 - `internal/snapshot`: the immutable checkout steps run in
+- `internal/resultcache`: per-user index of passing runs, keyed by tested tree, config hash, and plan hash
 
 ## Data flow
 
@@ -23,7 +24,7 @@ The runner understands processes and files. Consumer repos own the actual verifi
 2. Load `.local-ci.toml`.
 3. Get the static `[[steps]]` plan or execute the planner for stdout JSON. Refuse input changes during planning.
 4. Create the run directory and `meta.json` for those confirmed inputs.
-5. Persist `plan.json` and `plan.env`.
+5. Persist `plan.json` and `plan.env`. If a clean worktree's tree, config, and plan already passed in a snapshot (`internal/resultcache`), reuse that run: record `reused_from`, post its results to HEAD, and stop here.
 6. Create the snapshot: a detached worktree of the captured tree under `.local-ci/snapshots/<run-id>`, seeded copy-on-write with configured ignored paths (`internal/snapshot`).
 7. Execute ready steps in the snapshot under one run context, bounded by `max_parallel` (default 1), checking the snapshot still holds its tree before each step.
 8. On SIGINT/SIGTERM, stop launching new work and cancel every active process group on macOS and Linux.
