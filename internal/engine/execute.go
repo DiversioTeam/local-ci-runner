@@ -154,13 +154,13 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 			}()
 			opts.snapshot = &created
 			seedHash, hashError := snapshot.GetSeedHash(ctx, created.Dir, opts.Snapshot.Seed)
-			if hashError != nil {
+			if hashError != nil && ctx.Err() == nil {
 				if opts.Snapshot.ExpectedSeedHash != "" {
 					return RunRecord{}, fmt.Errorf("seed inputs changed or cannot be verified after copying: %w", hashError)
 				}
 				printProgress(progress, "warning: seed inputs cannot be reused: %v\n", hashError)
-			} else {
-				if opts.Snapshot.ExpectedSeedHash != "" && seedHash != opts.Snapshot.ExpectedSeedHash {
+			} else if hashError == nil {
+				if opts.Snapshot.ExpectedSeedHash != "" && seedHash != opts.Snapshot.ExpectedSeedHash && ctx.Err() == nil {
 					return RunRecord{}, fmt.Errorf("seed inputs changed while creating snapshot; retry with stable dependencies")
 				}
 				run.Meta.SeedHash = seedHash
