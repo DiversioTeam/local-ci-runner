@@ -37,6 +37,9 @@ func PublishCompletedRun(ctx context.Context, store persistence.Store, run RunRe
 	if run.Summary.Status == string(StepStateInterrupted) {
 		return fmt.Errorf("run %s was interrupted", run.RunID)
 	}
+	if run.Meta.SnapshotError != "" {
+		return fmt.Errorf("run %s cannot be published: %s", run.RunID, run.Meta.SnapshotError)
+	}
 	if strings.TrimSpace(run.Meta.GitHubPostingSuppressed) == "" {
 		return fmt.Errorf("run %s was configured to post during execution; publish requires a suppressed run (inspect receipts; configuration is not proof of publication)", run.RunID)
 	}

@@ -97,6 +97,22 @@ func executeReadySteps(
 				completedSteps[step.ID] = struct{}{}
 				continue
 			}
+			// Cheap guard: the snapshot must still hold the tree before any step runs.
+			if opts.snapshot != nil && run.Meta.SnapshotError == "" {
+				if verifyError := opts.snapshot.Verify(ctx); verifyError != nil && ctx.Err() == nil {
+					run.Meta.SnapshotError = verifyError.Error()
+					if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.MetaFile), run.Meta); err != nil {
+						return err
+					}
+				}
+			}
+			if run.Meta.SnapshotError != "" {
+				if err := addUnexecutedStep(ctx, store, run, stepIndex, StepStateBlocked, run.Meta.SnapshotError, now(), appender, opts); err != nil {
+					return err
+				}
+				completedSteps[step.ID] = struct{}{}
+				continue
+			}
 			if err := addStepStart(ctx, store, run, stepIndex, now, appender, opts); err != nil {
 				return err
 			}

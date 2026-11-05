@@ -107,6 +107,28 @@ func Discover(ctx context.Context, startDir string) (Info, error) {
 	}, nil
 }
 
+// Tree is the code a checkout holds right now: its HEAD commit and the
+// effective tree of its working copy, computed the same way as for Discover.
+type Tree struct {
+	HeadSHA          string
+	WorktreeTreeHash string
+}
+
+// CaptureTree reads HEAD and the working-copy tree of the checkout at dir
+// without touching its index. The runner uses it to prove a snapshot still
+// holds the code it was created with.
+func CaptureTree(ctx context.Context, dir string) (Tree, error) {
+	headSHA, err := gitOutput(ctx, dir, "rev-parse", "--verify", "--quiet", "HEAD")
+	if err != nil {
+		return Tree{}, err
+	}
+	snapshot, err := worktreeSnapshot(ctx, dir)
+	if err != nil {
+		return Tree{}, err
+	}
+	return Tree{HeadSHA: headSHA, WorktreeTreeHash: snapshot.treeHash}, nil
+}
+
 func ParseGitHubSlug(remoteURL string) (string, error) {
 	trimmed := strings.TrimSuffix(strings.TrimSpace(remoteURL), ".git")
 

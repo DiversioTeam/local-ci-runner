@@ -114,7 +114,8 @@ git` on Arch. Posting GitHub commit statuses also needs the `gh` CLI
 It:
 - loads `.local-ci.toml`
 - optionally asks a repo-owned planner for a resolved plan
-- executes black-box steps
+- executes black-box steps in an immutable snapshot of the captured tree, so
+  edits, checkouts and commits during a run cannot change what was tested
 - writes run artifacts under `.local-ci/runs/<run-id>/`
 - optionally posts GitHub commit statuses for the verified snapshot
 

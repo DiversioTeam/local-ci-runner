@@ -22,6 +22,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/gitrepo"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 	"github.com/DiversioTeam/local-ci-runner/internal/planner"
+	"github.com/DiversioTeam/local-ci-runner/internal/snapshot"
 	"github.com/DiversioTeam/local-ci-runner/internal/update"
 )
 
@@ -852,6 +853,18 @@ func (c *cli) executeAndReport(
 		Progress:  newProgressWriter(c.stderr, c.errStyles),
 		FromStep:  opts.fromStep,
 	}
+	if !inputs.configuration.Snapshot.Disabled {
+		executionOptions.Snapshot = &engine.SnapshotOptions{
+			Seed:           inputs.configuration.Snapshot.Seed,
+			AllowPlainCopy: inputs.configuration.Snapshot.AllowPlainCopy,
+		}
+	}
+	// A runner killed without cleanup (SIGKILL, power loss) leaves its snapshot behind.
+	if err := snapshot.RemoveStale(inputs.repository.Root, func(runID string) bool {
+		return isRunActive(inputs.store, runID)
+	}); err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "warning: %v\n", err)
+	}
 	if !opts.json {
 		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
 	}
@@ -1211,6 +1224,20 @@ func displayRunnerPID(meta persistence.Meta) *int {
 		return nil
 	}
 	return meta.RunnerPID
+}
+
+// isRunActive reports whether a run still has a live runner, so its snapshot is in use.
+func isRunActive(store persistence.Store, runID string) bool {
+	meta, err := persistence.ReadJSONFile[persistence.Meta](store.RunFile(runID, persistence.MetaFile))
+	if err != nil {
+		return false
+	}
+	// A resume claims its PID before clearing the previous attempt's finish time.
+	if meta.RunnerPID == nil || *meta.RunnerPID <= 0 {
+		return false
+	}
+	alive, known := getProcessAlive(*meta.RunnerPID)
+	return !known || alive
 }
 
 func getRunnerAlive(meta persistence.Meta) *bool {

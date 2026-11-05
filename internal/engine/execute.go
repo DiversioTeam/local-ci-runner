@@ -17,6 +17,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/events"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
+	"github.com/DiversioTeam/local-ci-runner/internal/snapshot"
 )
 
 const finalReportTimeout = 5 * time.Second
@@ -41,14 +42,25 @@ func (writer stepLogWriter) Write(output []byte) (int, error) {
 // ExecuteOptions configures one run execution.
 type ExecuteOptions struct {
 	// ForceStop requests immediate process-group termination when closed.
-	ForceStop          <-chan struct{}
-	Now                func() time.Time
-	Reporter           ghstatus.Reporter
-	Stdout             io.Writer
-	Stderr             io.Writer
-	Progress           io.Writer
-	FromStep           string
+	ForceStop <-chan struct{}
+	Now       func() time.Time
+	Reporter  ghstatus.Reporter
+	Stdout    io.Writer
+	Stderr    io.Writer
+	Progress  io.Writer
+	FromStep  string
+	// Snapshot runs the steps in an immutable checkout of the run's tree, so
+	// the live worktree can change while they run. Nil runs them in the live
+	// worktree, which records no tested tree.
+	Snapshot           *SnapshotOptions
 	finalReportContext context.Context
+	snapshot           *snapshot.Snapshot
+}
+
+// SnapshotOptions configures the immutable checkout for one execution.
+type SnapshotOptions struct {
+	Seed           []string
+	AllowPlainCopy bool
 }
 
 // ExecuteRun executes unfinished plan steps and persists their lifecycle.
@@ -70,6 +82,12 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 			return RunRecord{}, err
 		}
 		run.StepStatuses = statuses
+	}
+	// Interrupted snapshot attempts may never reach final verification; none of their successes are trusted.
+	if run.Meta.SnapshotError != "" || run.Meta.SnapshotDir != "" && run.Meta.TestedTreeHash != run.Meta.WorktreeTreeHash {
+		for index := range run.StepStatuses {
+			run.StepStatuses[index].State = string(StepStateStale)
+		}
 	}
 	order, err := executionOrder(run.Plan)
 	if err != nil {
@@ -101,6 +119,49 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := validateReporter(run.Meta, opts.Reporter); err != nil {
 		return RunRecord{}, err
 	}
+	// Successful steps kept from an earlier attempt count toward a tested tree
+	// only if that attempt itself finished with the tree verified.
+	reusesEarlierSteps := false
+	for _, status := range run.StepStatuses {
+		reusesEarlierSteps = reusesEarlierSteps || status.State == string(StepStateSuccess)
+	}
+	earlierTestedTree := run.Meta.TestedTreeHash
+	var snapshotDir string
+	if opts.Snapshot != nil {
+		// Claim the run before its snapshot exists, so another runner's
+		// stale-snapshot cleanup sees a live owner. Only the PID changes, so
+		// meta.json still agrees with summary.json if creation fails.
+		claimed := run.Meta
+		runnerPID := os.Getpid()
+		claimed.RunnerPID = &runnerPID
+		if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.MetaFile), claimed); err != nil {
+			return RunRecord{}, err
+		}
+		created, err := snapshot.Create(ctx, snapshot.Options{
+			RepoRoot:       run.Meta.RepoRoot,
+			RunID:          run.RunID,
+			HeadSHA:        run.Meta.HeadSHA,
+			TreeHash:       run.Meta.WorktreeTreeHash,
+			Seed:           opts.Snapshot.Seed,
+			AllowPlainCopy: opts.Snapshot.AllowPlainCopy,
+			Warn:           progress,
+		})
+		if err != nil && ctx.Err() == nil {
+			return RunRecord{}, fmt.Errorf("create snapshot: %w", err)
+		}
+		snapshotDir = snapshot.Path(run.Meta.RepoRoot, run.RunID)
+		// Creation cleans up its own errors; cancellation still needs the normal run finalization below.
+		if err == nil {
+			defer func() {
+				if removeError := snapshot.Remove(created.RepoRoot, created.Dir); removeError != nil {
+					printProgress(progress, "warning: %v\n", removeError)
+				}
+			}()
+			opts.snapshot = &created
+			printProgress(progress, "snapshot %s\n", created.Dir)
+		}
+	}
+	run.Meta.SnapshotDir, run.Meta.TestedTreeHash, run.Meta.SnapshotError = snapshotDir, "", ""
 	if run.Meta.StartedAt == nil {
 		startedAt := now()
 		run.Meta.StartedAt = &startedAt
@@ -137,6 +198,13 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		return RunRecord{}, err
 	}
 
+	if opts.snapshot != nil && ctx.Err() == nil && run.Meta.SnapshotError == "" {
+		if err := opts.snapshot.Verify(ctx); err != nil {
+			run.Meta.SnapshotError = err.Error()
+		} else if !reusesEarlierSteps || earlierTestedTree == opts.snapshot.TreeHash {
+			run.Meta.TestedTreeHash = opts.snapshot.TreeHash
+		}
+	}
 	finishedAt := now()
 	run.Meta.Interrupted = ctx.Err() != nil
 	run.Meta.FinishedAt = &finishedAt
@@ -262,8 +330,12 @@ func runProcess(ctx context.Context, forceStop <-chan struct{}, store persistenc
 		logWriteErrorOnce.Do(func() { firstLogWriteError = writeError })
 		cancelCommand()
 	}
+	stepDirectory, err := getStepDirectory(run.Meta, step.Dir)
+	if err != nil {
+		return err, nil, err.Error()
+	}
 	cmd := exec.CommandContext(commandContext, step.Command[0], step.Command[1:]...)
-	cmd.Dir = resolveStepDir(run.Meta.RepoRoot, step.Dir)
+	cmd.Dir = stepDirectory
 	cmd.Env = stepEnv(run, stepIndex, step)
 	stdoutLog := stepLogWriter{file: stdoutFile, addWriteError: addLogWriteError}
 	stderrLog := stepLogWriter{file: stderrFile, addWriteError: addLogWriteError}
@@ -479,11 +551,55 @@ func resolveNow(now func() time.Time) func() time.Time {
 	return func() time.Time { return time.Now().UTC() }
 }
 
-func resolveStepDir(repoRoot string, dir string) string {
-	if filepath.IsAbs(dir) {
-		return dir
+// executionRoot is where steps run: the snapshot when there is one.
+func executionRoot(meta persistence.Meta) string {
+	if meta.SnapshotDir != "" {
+		return meta.SnapshotDir
 	}
-	return filepath.Join(repoRoot, dir)
+	return meta.RepoRoot
+}
+
+func getStepDirectory(meta persistence.Meta, directory string) (string, error) {
+	if meta.SnapshotDir == "" {
+		if filepath.IsAbs(directory) {
+			return directory, nil
+		}
+		return filepath.Join(meta.RepoRoot, directory), nil
+	}
+	if filepath.IsAbs(directory) {
+		canonicalRoot, err := filepath.EvalSymlinks(meta.RepoRoot)
+		if err != nil {
+			return "", err
+		}
+		// Strip only the source root; descendant symlinks belong to the captured tree, not live files.
+		for _, sourceRoot := range []string{meta.RepoRoot, canonicalRoot} {
+			relativeDirectory, err := filepath.Rel(sourceRoot, directory)
+			if err == nil && relativeDirectory != ".." && !strings.HasPrefix(relativeDirectory, ".."+string(filepath.Separator)) {
+				directory = relativeDirectory
+				break
+			}
+		}
+		if filepath.IsAbs(directory) {
+			return "", fmt.Errorf("step directory %q is outside snapshot", directory)
+		}
+	}
+	directory = filepath.Clean(directory)
+	if directory == ".." || strings.HasPrefix(directory, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("step directory %q is outside snapshot", directory)
+	}
+	snapshotRoot, err := filepath.EvalSymlinks(meta.SnapshotDir)
+	if err != nil {
+		return "", err
+	}
+	stepDirectory, err := filepath.EvalSymlinks(filepath.Join(snapshotRoot, directory))
+	if err != nil {
+		return "", err
+	}
+	relativeDirectory, err := filepath.Rel(snapshotRoot, stepDirectory)
+	if err != nil || relativeDirectory == ".." || strings.HasPrefix(relativeDirectory, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("step directory %q is outside snapshot", directory)
+	}
+	return stepDirectory, nil
 }
 
 func stepEnv(run RunRecord, stepIndex int, step config.Step) []string {
@@ -503,7 +619,8 @@ func stepEnv(run RunRecord, stepIndex int, step config.Step) []string {
 	}
 
 	env["LOCAL_CI_RUN_ID"] = run.RunID
-	env["LOCAL_CI_REPO_ROOT"] = run.Meta.RepoRoot
+	env["LOCAL_CI_REPO_ROOT"] = executionRoot(run.Meta)
+	env["LOCAL_CI_SOURCE_ROOT"] = run.Meta.RepoRoot
 	env["LOCAL_CI_CONFIG"] = run.Meta.ConfigPath
 	env["LOCAL_CI_RUN_DIR"] = run.RunDir
 	env["LOCAL_CI_PLAN_FILE"] = filepath.Join(run.RunDir, persistence.PlanFile)

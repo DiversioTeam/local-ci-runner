@@ -39,6 +39,7 @@ consumer-repo-specific workflow logic.
 - `internal/events` — append-only event log contract
 - `internal/github` — commit-status posting
 - `internal/gitrepo` — repo discovery and identity helpers
+- `internal/snapshot` — the immutable checkout a run's steps execute in
 - `internal/update` — release version, update notice, and self-update logic
 - `.local-ci.toml` — this repo's own verification steps
 - `examples/basic` — minimal static config example
