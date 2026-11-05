@@ -167,7 +167,9 @@ local-ci run --no-github
 
 SIGINT or SIGTERM stops all active steps—including their process groups on macOS
 and Linux—persists the run as `interrupted`, and lets
-`local-ci resume <run-id>` rerun unfinished work.
+`local-ci resume <run-id>` rerun the full plan in a fresh snapshot, rebuilding
+prerequisite outputs. With snapshots disabled, resume reruns unfinished work
+and can retain earlier successes.
 
 A GitHub status-post failure is recorded and disables further posting without
 stopping local checks. Fix auth or connectivity, then publish the completed run.

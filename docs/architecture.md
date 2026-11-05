@@ -94,8 +94,10 @@ Resume must fail closed if any of these changed:
 - config hash
 - planner output hash
 
-The runner can reuse prior successful steps only inside the same immutable run identity.
-Interrupted and otherwise unfinished steps are rerun.
+A fresh snapshot lacks the earlier steps' generated files, so snapshot resume
+reruns the complete plan, including with `--from-step`. With snapshots disabled,
+prior successful steps can be retained inside the same immutable run identity;
+interrupted and otherwise unfinished steps are rerun.
 
 ## Parallel execution
 
