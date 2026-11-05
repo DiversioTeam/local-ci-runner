@@ -159,8 +159,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 					return RunRecord{}, fmt.Errorf("seed inputs changed or cannot be verified after copying: %w", hashError)
 				}
 				printProgress(progress, "warning: seed inputs cannot be reused: %v\n", hashError)
-			} else if hashError == nil {
-				if opts.Snapshot.ExpectedSeedHash != "" && seedHash != opts.Snapshot.ExpectedSeedHash && ctx.Err() == nil {
+			} else if hashError == nil && opts.Snapshot.ExpectedSeedHash != "" && ctx.Err() == nil {
+				if seedHash != opts.Snapshot.ExpectedSeedHash {
 					return RunRecord{}, fmt.Errorf("seed inputs changed while creating snapshot; retry with stable dependencies")
 				}
 				run.Meta.SeedHash = seedHash

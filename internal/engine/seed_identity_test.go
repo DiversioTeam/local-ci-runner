@@ -48,3 +48,45 @@ func TestChangedSeedIdentityRefusesExecution(t *testing.T) {
 		})
 	}
 }
+
+func TestUnverifiedInitialSeedsRemainUncacheableAfterValidCopy(t *testing.T) {
+	t.Parallel()
+	plan := config.ResolvedPlan{Steps: []config.Step{{ID: "check", Command: []string{"sh", "-c", `test "$(cat .env)" = ready`}}}}
+	root, store, run := newSnapshotRun(t, plan, config.GitHub{}, "")
+	writeFile(t, filepath.Join(root, ".git", "info", "exclude"), []byte(".env\n"))
+	path := filepath.Join(root, ".env")
+	external := filepath.Join(t.TempDir(), "seed")
+	writeFile(t, external, []byte("ready"))
+	if err := os.Symlink(external, path); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := snapshot.GetSeedHash(t.Context(), root, []string{".env"})
+	if err == nil || expected != "" {
+		t.Fatalf("initial external seed hash = %q, %v; want unverified inputs", expected, err)
+	}
+	// Recover before copying, deterministically reproducing an initially failed hash.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, []byte("ready"))
+	if hash, err := snapshot.GetSeedHash(t.Context(), root, []string{".env"}); err != nil || hash == "" {
+		t.Fatalf("recovered seed is not fingerprintable: %q, %v", hash, err)
+	}
+	executed, err := ExecuteRun(t.Context(), store, run, ExecuteOptions{Snapshot: &SnapshotOptions{
+		Seed: []string{".env"}, AllowPlainCopy: true, ExpectedSeedHash: expected,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadRun(store, executed.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Summary.Status != string(StepStateSuccess) || loaded.Meta.TestedTreeHash == "" {
+		t.Fatalf("unverified initial inputs prevented fresh execution: %+v", loaded.Meta)
+	}
+	if loaded.Meta.SeedHash != "" {
+		t.Fatalf("copied hash made initially unverified seeds reusable: %q", loaded.Meta.SeedHash)
+	}
+	requireSnapshotRemoved(t, loaded)
+}

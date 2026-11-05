@@ -11,6 +11,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
+	"github.com/DiversioTeam/local-ci-runner/internal/snapshot"
 )
 
 // newReusePair runs a plan once in a snapshot (the source) and prepares a second run of the same
@@ -18,7 +19,11 @@ import (
 func newReusePair(t *testing.T, plan config.ResolvedPlan, githubConfig config.GitHub, suppressed string) (persistence.Store, RunRecord, RunRecord) {
 	t.Helper()
 	_, store, run := newSnapshotRun(t, plan, config.GitHub{}, "")
-	source, err := ExecuteRun(t.Context(), store, run, ExecuteOptions{Snapshot: &SnapshotOptions{}})
+	seedHash, err := snapshot.GetSeedHash(t.Context(), run.Meta.RepoRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := ExecuteRun(t.Context(), store, run, ExecuteOptions{Snapshot: &SnapshotOptions{ExpectedSeedHash: seedHash}})
 	if err != nil {
 		t.Fatal(err)
 	}

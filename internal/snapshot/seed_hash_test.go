@@ -306,3 +306,34 @@ func TestGetSeedHashUnreadableFile(t *testing.T) {
 		t.Fatal("error exposed file contents")
 	}
 }
+
+func TestGetSeedHashHardLinks(t *testing.T) {
+	t.Parallel()
+	for _, seeds := range [][]string{{"cache"}, {"cache/a", "cache/b"}} {
+		t.Run(strings.Join(seeds, ","), func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			a, b := filepath.Join(root, "cache", "a"), filepath.Join(root, "cache", "b")
+			writeFile(t, a, "original")
+			writeFile(t, b, "original")
+			independent := seedHash(t, root, seeds...)
+			// A pnpm-style store link outside the copied inputs does not survive copying.
+			if err := os.Link(a, filepath.Join(t.TempDir(), "store-file")); err != nil {
+				t.Fatal(err)
+			}
+			if got := seedHash(t, root, seeds...); got != independent {
+				t.Fatal("external store hard link changed the seed identity")
+			}
+			if err := os.Remove(b); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(a, b); err != nil {
+				t.Fatal(err)
+			}
+			hash, err := GetSeedHash(t.Context(), root, seeds)
+			if hash != "" || err == nil || !strings.Contains(err.Error(), `hard link to seed path "cache/a"`) {
+				t.Fatalf("aliased seed paths remained reusable: hash=%q error=%v", hash, err)
+			}
+		})
+	}
+}

@@ -265,6 +265,12 @@ Seed identity includes file bytes, paths, permissions and symlink targets, not
 just lockfiles or timestamps. A dependency edit with an unchanged lockfile must
 run fresh checks. Hashing reads the configured inputs but records only a digest,
 not their contents. External symlinks are allowed for execution but disable reuse.
+Multiple regular-file paths sharing an inode within or across configured seeds
+also disable reuse: Linux directory copies preserve these aliases, but separate
+seed copies and Darwin copy methods can break them. Hard links only to paths
+outside the configured seeds (for example an external pnpm store) still permit
+reuse. Unverified initial inputs remain uncacheable even if copying makes them
+fingerprintable; fresh checks still execute.
 Snapshot-local writes to dependency caches are outputs, not new inputs: they do
 not prevent reuse of a fully successful run with matching initial seeds. A cache
 hit returns verification results, not generated build artifacts. Prefer

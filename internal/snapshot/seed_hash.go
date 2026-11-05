@@ -17,6 +17,7 @@ import (
 // GetSeedHash fingerprints seed names, missing paths, modes, file contents and
 // symlink text, without following directory symlinks or including timestamps.
 // Unresolved, external and absolute symlinks cannot safely identify a snapshot.
+// Multiple seed paths sharing a regular-file inode are not reusable across copy methods.
 func GetSeedHash(ctx context.Context, root string, seedPaths []string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("snapshot.seed root %q: %w", root, err)
@@ -56,7 +57,8 @@ func GetSeedHash(ctx context.Context, root string, seedPaths []string) (string, 
 	}
 
 	hash := sha256.New()
-	fmt.Fprintln(hash, "snapshot.seed.v1")
+	fmt.Fprintln(hash, "snapshot.seed.v2")
+	files := make(map[[2]uint64]string)
 	buffer := make([]byte, 32*1024)
 	for _, seedPath := range paths {
 		if err := ctx.Err(); err != nil {
@@ -120,6 +122,16 @@ func GetSeedHash(ctx context.Context, root string, seedPaths []string) (string, 
 				}
 				fmt.Fprintf(hash, "symlink %q\n", text)
 			case info.Mode().IsRegular():
+				stat, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					return fmt.Errorf("path %q: file identity is unavailable", rel)
+				}
+				identity := [2]uint64{uint64(stat.Dev), uint64(stat.Ino)}
+				// shortcut: bypass in-seed aliases until every copy method preserves their topology.
+				if previous, ok := files[identity]; ok {
+					return fmt.Errorf("path %q: hard link to seed path %q is not fingerprintable", rel, previous)
+				}
+				files[identity] = rel
 				digest, err := getSeedFileHash(ctx, path, info, buffer)
 				if err != nil {
 					return fmt.Errorf("path %q: hash regular file: %w", rel, err)
