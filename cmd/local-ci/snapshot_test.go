@@ -176,9 +176,35 @@ func TestRunReusesAPassingResultForTheSameTreeOnAnotherCommit(t *testing.T) {
 		t.Fatalf("missing source: executions = %d, reused_from = %+v, stderr = %q", executions(), fallback.Meta.ReusedFrom, stderr)
 	}
 
+	expectedExecutions := 3
+	for _, unavailable := range []string{"missing", "unreadable"} {
+		if unavailable == "unreadable" && os.Geteuid() == 0 {
+			continue // Root can read mode-000 files.
+		}
+		outputPath := filepath.Join(root, ".local-ci", "runs", fallback.RunID, "steps", "001-check", "output.env")
+		var damageError error
+		if unavailable == "missing" {
+			damageError = os.Remove(outputPath)
+		} else {
+			damageError = os.Chmod(outputPath, 0)
+		}
+		if damageError != nil {
+			t.Fatal(damageError)
+		}
+		stderr, fallback = run()
+		expectedExecutions++
+		if executions() != expectedExecutions || fallback.Meta.ReusedFrom != nil || !strings.Contains(stderr, "not reusing run") {
+			t.Fatalf("%s output did not fall back: executions=%d, reused=%+v, stderr=%s", unavailable, executions(), fallback.Meta.ReusedFrom, stderr)
+		}
+		_, repaired := run()
+		if executions() != expectedExecutions || repaired.Meta.ReusedFrom == nil || repaired.Meta.ReusedFrom.RunID != fallback.RunID {
+			t.Fatalf("%s output left a broken index: executions=%d, reused=%+v", unavailable, executions(), repaired.Meta.ReusedFrom)
+		}
+	}
+
 	// A dirty worktree always executes.
 	writeFile(t, filepath.Join(root, "README.md"), []byte("dirty\n"))
-	if _, dirty := run(); executions() != 4 || dirty.Meta.ReusedFrom != nil {
+	if _, dirty := run(); executions() != expectedExecutions+1 || dirty.Meta.ReusedFrom != nil {
 		t.Fatalf("dirty: executions = %d, reused_from = %+v", executions(), dirty.Meta.ReusedFrom)
 	}
 }

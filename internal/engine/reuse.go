@@ -48,6 +48,12 @@ func CheckReusable(source RunRecord, run RunRecord) error {
 	case len(source.StepStatuses) != len(run.StepStatuses):
 		return fmt.Errorf("run %s has a different number of steps", source.RunID)
 	}
+	// Missing source artifacts invalidate the cache entry before reuse starts, not the new run.
+	for stepIndex, status := range source.StepStatuses {
+		if _, err := os.ReadFile(storeStepFile(source.RunDir, stepIndex, status.StepID, persistence.OutputEnv)); err != nil {
+			return fmt.Errorf("run %s outputs for step %s are unavailable: %w", source.RunID, status.StepID, err)
+		}
+	}
 	return nil
 }
 

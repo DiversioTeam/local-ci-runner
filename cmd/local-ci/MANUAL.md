@@ -236,8 +236,9 @@ The index lives in the user cache, at
 `~/.cache` on Linux. Each successful snapshot run writes its entry atomically.
 
 A run still executes in these cases:
-- the original run directory is gone, no longer loads, or no longer qualifies.
-  The entry is then dropped.
+- the original run directory is gone, no longer loads, has missing or unreadable
+  step outputs, or no longer qualifies. The entry is then dropped and a fresh
+  successful run repairs the index.
 - the worktree is dirty, or `[snapshot] disabled` is set.
 - you pass `local-ci run --no-reuse`.
 

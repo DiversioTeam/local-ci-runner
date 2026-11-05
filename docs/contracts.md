@@ -91,7 +91,7 @@ The reusing run:
 
 `reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
 
-An entry whose run is missing, fails to load, or no longer qualifies is removed, and the checks run. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` always execute.
+An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` always execute.
 
 ## 2. Planner stdout
 
