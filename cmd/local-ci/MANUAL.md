@@ -180,8 +180,11 @@ still has its HEAD and tree. If a step changed tracked or unignored files, the
 run finishes as `snapshot_changed` (aggregate `error`, "checked code changed
 during local verification"), later steps are blocked, and the run cannot be
 published. Resume reruns every step from that invalid attempt, even with
-`--from-step`, so earlier successes cannot hide the change. Write generated
-files to Git-ignored paths.
+`--from-step`, so earlier successes cannot hide the change. The same rule applies
+to interrupted snapshot attempts that never verified their tree. Legacy and
+snapshot-disabled attempts retain their existing resume behavior. Write generated
+files to Git-ignored paths. Cancellation during snapshot creation also finishes
+the run as interrupted and returns the signal exit code.
 
 Absolute step directories inside the source repo map to the snapshot. Paths
 outside it, including relative escapes and symlinks, are refused before the

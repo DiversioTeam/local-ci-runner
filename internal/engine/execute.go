@@ -83,8 +83,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		}
 		run.StepStatuses = statuses
 	}
-	// A changed snapshot invalidates every result, including successes outside --from-step.
-	if run.Meta.SnapshotError != "" {
+	// Interrupted snapshot attempts may never reach final verification; none of their successes are trusted.
+	if run.Meta.SnapshotError != "" || run.Meta.SnapshotDir != "" && run.Meta.TestedTreeHash != run.Meta.WorktreeTreeHash {
 		for index := range run.StepStatuses {
 			run.StepStatuses[index].State = string(StepStateStale)
 		}
@@ -146,18 +146,20 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 			AllowPlainCopy: opts.Snapshot.AllowPlainCopy,
 			Warn:           progress,
 		})
-		if err != nil {
+		if err != nil && ctx.Err() == nil {
 			return RunRecord{}, fmt.Errorf("create snapshot: %w", err)
 		}
-		// Removal must happen on every exit: success, failure, interrupt, or a fatal error.
-		defer func() {
-			if removeError := snapshot.Remove(created.RepoRoot, created.Dir); removeError != nil {
-				printProgress(progress, "warning: %v\n", removeError)
-			}
-		}()
-		opts.snapshot = &created
-		snapshotDir = created.Dir
-		printProgress(progress, "snapshot %s\n", created.Dir)
+		snapshotDir = snapshot.Path(run.Meta.RepoRoot, run.RunID)
+		// Creation cleans up its own errors; cancellation still needs the normal run finalization below.
+		if err == nil {
+			defer func() {
+				if removeError := snapshot.Remove(created.RepoRoot, created.Dir); removeError != nil {
+					printProgress(progress, "warning: %v\n", removeError)
+				}
+			}()
+			opts.snapshot = &created
+			printProgress(progress, "snapshot %s\n", created.Dir)
+		}
 	}
 	run.Meta.SnapshotDir, run.Meta.TestedTreeHash, run.Meta.SnapshotError = snapshotDir, "", ""
 	if run.Meta.StartedAt == nil {
