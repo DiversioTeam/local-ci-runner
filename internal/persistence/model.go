@@ -56,6 +56,16 @@ type Meta struct {
 	TestedTreeHash string `json:"tested_tree_hash,omitempty"`
 	// SnapshotError explains why the snapshot stopped matching the tree.
 	SnapshotError string `json:"snapshot_error,omitempty"`
+	// ReusedFrom names the earlier run whose result this run reused instead of
+	// executing, because it tested the same tree with the same config and plan.
+	ReusedFrom *ReusedFrom `json:"reused_from,omitempty"`
+}
+
+// ReusedFrom identifies the run a reused result came from.
+type ReusedFrom struct {
+	RunID   string `json:"run_id"`
+	RunDir  string `json:"run_dir"`
+	HeadSHA string `json:"head_sha"`
 }
 
 type Summary struct {

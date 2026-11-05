@@ -22,6 +22,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/gitrepo"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
 	"github.com/DiversioTeam/local-ci-runner/internal/planner"
+	"github.com/DiversioTeam/local-ci-runner/internal/resultcache"
 	"github.com/DiversioTeam/local-ci-runner/internal/snapshot"
 	"github.com/DiversioTeam/local-ci-runner/internal/update"
 )
@@ -65,6 +66,7 @@ type executionCLIOptions struct {
 	maxParallel int
 	json        bool
 	fromStep    string
+	noReuse     bool
 }
 
 // The captured repository, configuration, and plan travel together so every
@@ -325,13 +327,92 @@ func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct
 		return err
 	}
 
+	c.removeStaleSnapshots(inputs)
+	if source, ok := c.findReusableRun(inputs, runRecord, opts); ok {
+		reused, err := engine.ReuseRun(commandContext, inputs.store, runRecord, source, engine.ReuseOptions{
+			Reporter: newReporter(inputs.configuration, opts.noGitHub),
+			Progress: newProgressWriter(c.stderr, c.errStyles),
+		})
+		if err != nil {
+			return err
+		}
+		return c.reportRun(commandContext, inputs, reused, opts)
+	}
 	return c.executeAndReport(commandContext, forceStop, inputs, runRecord, opts)
+}
+
+// findReusableRun returns a finished, all-success, snapshot-tested run of the
+// same tree, configuration, and plan, from any branch or worktree of this
+// repository on this machine. Anything doubtful falls back to a real run.
+func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts executionCLIOptions) (engine.RunRecord, bool) {
+	if opts.noReuse || inputs.configuration.Snapshot.Disabled || inputs.repository.DirtyWorktree {
+		return engine.RunRecord{}, false
+	}
+	root, err := resultcache.Root()
+	if err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "warning: result reuse disabled: %v\n", err)
+		return engine.RunRecord{}, false
+	}
+	key := resultKey(run.Meta, inputs.repository.WorktreeTreeHash)
+	entry, found, err := resultcache.Lookup(root, key)
+	if err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "warning: result index unreadable, running checks: %v\n", err)
+		return engine.RunRecord{}, false
+	}
+	if !found {
+		return engine.RunRecord{}, false
+	}
+	sourceStore := persistence.NewStore(entry.RepoRoot)
+	source, err := engine.LoadRun(sourceStore, entry.RunID)
+	if err == nil && source.RunDir != entry.RunDir {
+		err = fmt.Errorf("run directory moved to %s", source.RunDir)
+	}
+	if err == nil {
+		err = engine.CheckReusable(source, run)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "not reusing run %s, running checks: %v\n", entry.RunID, err)
+		_ = resultcache.Forget(root, key)
+		return engine.RunRecord{}, false
+	}
+	return source, true
+}
+
+// recordResult indexes a run that may stand in for later runs of its tree.
+func (c *cli) recordResult(run engine.RunRecord) {
+	if run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "" || run.Meta.ReusedFrom != nil || run.Meta.FinishedAt == nil {
+		return
+	}
+	root, err := resultcache.Root()
+	if err == nil {
+		err = resultcache.Record(root, resultcache.Entry{
+			RepoSlug:       run.Meta.RepoSlug,
+			RepoRoot:       run.Meta.RepoRoot,
+			RunID:          run.RunID,
+			RunDir:         run.RunDir,
+			HeadSHA:        run.Meta.HeadSHA,
+			TestedTreeHash: run.Meta.TestedTreeHash,
+			ConfigHash:     run.Meta.ConfigHash,
+			PlanHash:       run.Meta.PlanHash,
+			FinishedAt:     *run.Meta.FinishedAt,
+		})
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "warning: result not indexed for reuse: %v\n", err)
+	}
+}
+
+func resultKey(meta persistence.Meta, tree string) resultcache.Key {
+	return resultcache.Key{RepoSlug: meta.RepoSlug, TestedTreeHash: tree, ConfigHash: meta.ConfigHash, PlanHash: meta.PlanHash}
 }
 
 func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan struct{}, args []string) error {
 	opts, runID, err := parseExecutionAndRunIDArgs(args)
 	if err != nil {
 		return err
+	}
+	if opts.noReuse {
+		return fmt.Errorf("--no-reuse is supported only by run; resume always executes")
 	}
 
 	inputs, err := loadPlanInputs(commandContext, c.cwd, opts.configPath)
@@ -344,6 +425,7 @@ func (c *cli) resumeCommand(commandContext context.Context, forceStop <-chan str
 	}
 	runRecord.Meta.GitHubPostingSuppressed = suppressedGitHubPostingReason(runRecord.Meta.GitHubPostingSuppressed, inputs.repository.DirtyWorktree, opts.noGitHub, inputs.configuration.GitHub.Enabled)
 	runRecord.Meta.MaxParallel = getMaxParallel(inputs.configuration, opts)
+	c.removeStaleSnapshots(inputs)
 
 	return c.executeAndReport(commandContext, forceStop, inputs, runRecord, opts)
 }
@@ -859,12 +941,6 @@ func (c *cli) executeAndReport(
 			AllowPlainCopy: inputs.configuration.Snapshot.AllowPlainCopy,
 		}
 	}
-	// A runner killed without cleanup (SIGKILL, power loss) leaves its snapshot behind.
-	if err := snapshot.RemoveStale(inputs.repository.Root, func(runID string) bool {
-		return isRunActive(inputs.store, runID)
-	}); err != nil {
-		_, _ = fmt.Fprintf(c.stderr, "warning: %v\n", err)
-	}
 	if !opts.json {
 		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
 	}
@@ -872,7 +948,20 @@ func (c *cli) executeAndReport(
 	if err != nil {
 		return err
 	}
+	c.recordResult(executed)
+	return c.reportRun(commandContext, inputs, executed, opts)
+}
 
+func (c *cli) removeStaleSnapshots(inputs planInputs) {
+	// Cache hits must also clean up snapshots left by dead runners.
+	if err := snapshot.RemoveStale(inputs.repository.Root, func(runID string) bool {
+		return isRunActive(inputs.store, runID)
+	}); err != nil {
+		_, _ = fmt.Fprintf(c.stderr, "warning: %v\n", err)
+	}
+}
+
+func (c *cli) reportRun(commandContext context.Context, inputs planInputs, executed engine.RunRecord, opts executionCLIOptions) error {
 	if opts.json {
 		items, eventError := events.ReadFile(inputs.store.RunFile(executed.RunID, persistence.EventsFile))
 		if err := writeJSON(c.stdout, buildShowJSON(executed, inputs.store, items, eventError)); err != nil {
@@ -882,6 +971,9 @@ func (c *cli) executeAndReport(
 		_, _ = fmt.Fprintf(c.stdout, "run %s: %s\n", executed.RunID, c.outStyles.status(executed.Summary.Status, executed.Summary.Status))
 		_, _ = fmt.Fprintf(c.stdout, "repo: %s @ %s\n", inputs.repository.RepoSlug, inputs.repository.HeadSHA)
 		_, _ = fmt.Fprintf(c.stdout, "artifacts: %s\n", executed.RunDir)
+		if from := executed.Meta.ReusedFrom; from != nil {
+			_, _ = fmt.Fprintf(c.stdout, "reused: run %s on %s supplied the original results; see step logs for any resumed checks\n", from.RunID, from.HeadSHA)
+		}
 		switch executed.Meta.GitHubPostingSuppressed {
 		case "dirty_worktree":
 			_, _ = fmt.Fprintln(c.stdout, "github: skipped for dirty worktree; commit the same snapshot and use local-ci publish <run-id>")
@@ -951,6 +1043,8 @@ func parseExecutionArgs(args []string, allowPositional bool) (executionCLIOption
 			opts.configPath = args[index]
 		case arg == "--no-github":
 			opts.noGitHub = true
+		case arg == "--no-reuse":
+			opts.noReuse = true
 		case arg == "--json":
 			opts.json = true
 		case arg == "--max-parallel" || strings.HasPrefix(arg, "--max-parallel="):
@@ -1608,13 +1702,14 @@ Notes:
 func (c *cli) printRunHelp() {
 	c.printVersion()
 	_, _ = io.WriteString(c.stdout, `Usage:
-  local-ci run [--config <path>] [--no-github] [--max-parallel <count>] [--json]
+  local-ci run [--config <path>] [--no-github] [--no-reuse] [--max-parallel <count>] [--json]
 
 Start a new local CI run, stream progress live, and persist artifacts under .local-ci/runs/<run-id>/.
 
 Flags:
   --config <path>         Config file path. Default: .local-ci.toml
   --no-github             Disable GitHub status posting for this execution
+  --no-reuse              Run the checks even if this tree already passed
   --max-parallel <count>  Positive worker limit. Default: config max_parallel, otherwise 1
   --json                  One final snapshot on stdout, same schema as show --json; progress on stderr
 
@@ -1630,6 +1725,8 @@ Notes:
   - Independent steps continue after check failures; failed dependencies block dependents, skipped dependencies satisfy needs.
   - Step timeout (e.g. timeout = "10m") is a failure, not operator interruption.
   - Use local-ci plan --json to inspect the complete plan before running it.
+  - A clean checkout whose tree already passed in a snapshot, with the same config and plan, reuses that
+    run: no checks execute, and every context is posted to HEAD as "reused: run <id> on <sha> (same tree)".
   - No partial-plan run is supported; --max-parallel 1 changes scheduling, not coverage.
   - Runner progress lines are separate from persisted step logs.
   - On step failure or interruption the CLI prints the exact combined log path immediately.
