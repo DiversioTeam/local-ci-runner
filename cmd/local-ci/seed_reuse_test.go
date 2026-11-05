@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestSeedWritesDisableReuseWithoutFailingChecks(t *testing.T) {
+func TestSeedWritesRemainReusableWithMatchingInitialInputs(t *testing.T) {
 	t.Parallel()
 	root := newGitRepo(t)
 	writeFile(t, filepath.Join(root, ".gitignore"), []byte(".env\n"))
@@ -32,12 +32,12 @@ command = ['sh', '-c', 'printf changed > .env; printf x >> "$LOCAL_CI_SOURCE_ROO
 		if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
 			t.Fatal(err)
 		}
-		if shown.Meta.ReusedFrom != nil || shown.Meta.TestedSeedHash != "" || shown.Meta.TestedTreeHash == "" {
-			t.Fatalf("changed seeds were reusable or lost tracked-tree verification: %+v", shown.Meta)
+		if (shown.Meta.ReusedFrom != nil) != (i == 1) || shown.Meta.SeedHash == "" || shown.Meta.TestedTreeHash == "" {
+			t.Fatalf("matching initial seeds did not reuse the completed plan: %+v", shown.Meta)
 		}
 	}
 	executions, err := os.ReadFile(filepath.Join(root, ".local-ci", "executions"))
-	if err != nil || string(executions) != "xx" {
+	if err != nil || string(executions) != "x" {
 		t.Fatalf("executions=%q error=%v", executions, err)
 	}
 	contents, err := os.ReadFile(filepath.Join(root, ".env"))

@@ -47,7 +47,7 @@ func CheckReusable(source RunRecord, run RunRecord) error {
 		return fmt.Errorf("run %s used another or external configuration location", source.RunID)
 	case sourceMeta.ConfigHash != meta.ConfigHash:
 		return fmt.Errorf("run %s used another configuration", source.RunID)
-	case meta.SeedHash == "" || sourceMeta.TestedSeedHash != meta.SeedHash:
+	case meta.SeedHash == "" || sourceMeta.SeedHash != meta.SeedHash:
 		return fmt.Errorf("run %s did not verify the current seeded inputs", source.RunID)
 	case sourceMeta.PlanHash != meta.PlanHash:
 		return fmt.Errorf("run %s used another plan", source.RunID)
@@ -135,7 +135,6 @@ func ReuseRun(ctx context.Context, store persistence.Store, run RunRecord, sourc
 	finishedAt := now()
 	run.Meta.FinishedAt = &finishedAt
 	run.Meta.TestedTreeHash = source.Meta.TestedTreeHash
-	run.Meta.TestedSeedHash = source.Meta.TestedSeedHash
 	if err := persistence.WriteJSONFile(store.RunFile(run.RunID, persistence.MetaFile), run.Meta); err != nil {
 		return RunRecord{}, err
 	}

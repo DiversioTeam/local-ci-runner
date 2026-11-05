@@ -34,7 +34,7 @@ type Options struct {
 	// Seed are Git-ignored paths cloned from the live worktree.
 	Seed           []string
 	AllowPlainCopy bool
-	// Warn receives one line per seed path that was skipped or fully copied.
+	// Warn receives one line per seed path that was fully copied.
 	Warn io.Writer
 }
 
@@ -175,8 +175,7 @@ func seed(ctx context.Context, opts Options, dir string, path string) error {
 		return fmt.Errorf("snapshot.seed %q: remove partial clone: %w", path, err)
 	}
 	if !opts.AllowPlainCopy {
-		warn(opts.Warn, "snapshot: not seeding %s: %v (set snapshot.allow_plain_copy = true to copy it instead)", path, cloneError)
-		return nil
+		return fmt.Errorf("snapshot.seed %q: clone failed: %w (set snapshot.allow_plain_copy = true to permit a full copy)", path, cloneError)
 	}
 	if err := plainCopy(ctx, source, target); err != nil {
 		_ = os.RemoveAll(target)

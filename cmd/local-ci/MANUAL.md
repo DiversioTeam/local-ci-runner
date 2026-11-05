@@ -179,10 +179,10 @@ Before each step and before the final status, the runner checks the snapshot
 still has its HEAD and tree. If a step changed tracked or unignored files, the
 run finishes as `snapshot_changed` (aggregate `error`, "checked code changed
 during local verification"), later steps are blocked, and the run cannot be
-published. Resume reruns every step from that invalid attempt, even with
-`--from-step`, so earlier successes cannot hide the change. The same rule applies
-to interrupted snapshot attempts that never verified their tree. Legacy and
-snapshot-disabled attempts retain their existing resume behavior. Write generated
+published. Every snapshot resume reruns the complete plan, even with
+`--from-step`: a fresh snapshot has none of the earlier steps' generated files,
+so all prerequisites must run again. Snapshot-disabled execution retains
+selective resume behavior. Write generated
 files to Git-ignored paths. Cancellation during snapshot creation also finishes
 the run as interrupted and returns the signal exit code.
 
@@ -203,8 +203,8 @@ seed = [".venv", "node_modules", ".env"]
 ```
 
 Seed paths must be Git-ignored and absent from the tree. A path the live
-worktree lacks is skipped. Without copy-on-write support a path is skipped with
-a warning unless `allow_plain_copy = true`. Copied symlinks into the live
+worktree lacks is skipped. An existing path that cannot be cloned stops the run
+with guidance to enable `allow_plain_copy = true`; it is never silently omitted. Copied symlinks into the live
 worktree or with unreadable targets are refused: an edit there would leak into
 the run. Snapshot-local links and external tool links remain allowed. Outputs steps write inside the
 snapshot are discarded with it; keep results in `LOCAL_CI_STEP_DIR` or write to
@@ -221,14 +221,14 @@ The earlier run must have:
 - finished with every step `success`, in a snapshot that held exactly this tree
   (`tested_tree_hash`);
 - used the same repo-relative config location, config (`config_hash`), plan (`plan_hash`)
-  and seed contents (`seed_hash`), verified unchanged at completion (`tested_seed_hash`);
+  and initial seed contents (`seed_hash`), verified against the copied snapshot before execution;
 - been in this repository, on any branch, commit or worktree on this machine.
 
 The new run executes nothing. It records `reused_from` and copies each step's
 outcome. It posts every context and the aggregate to the new HEAD, described as
 `reused: run <id> on <sha12> (same tree)`. Its step `combined.log` points at
 the original run's log. Each step's `output.env` is copied too, so a later
-`resume --from-step` can consume outputs from a successful prerequisite.
+inspection and snapshot-disabled `resume --from-step` can consume the stored outputs.
 Delayed publication includes the source run and SHA in terminal descriptions.
 Cache hits also clean up snapshots left by dead runners.
 
@@ -249,24 +249,26 @@ A run still executes in these cases:
   step outputs, or no longer qualifies. The entry is then dropped and a fresh
   successful run repairs the index.
 - the worktree is dirty, or `[snapshot] disabled` is set.
-- seeded inputs cannot be fingerprinted safely (for example external symlinks or
-  unreadable files), or changed during the earlier run. Checks still execute;
+- initial seeded inputs cannot be fingerprinted safely (for example external
+  symlinks or unreadable files). Checks still execute;
   their result is not cached.
 - the plan contains absolute step directories: their validity depends on the
   destination checkout, so fresh execution must check them.
 - the selected config is outside the repository.
 - you pass `local-ci run --no-reuse`.
 
-`resume` never takes a cache hit, but can retain successful prerequisite steps.
-The original `reused_from` stays as history; consult step logs for resumed checks.
-Changed or unverified seed contents invalidate earlier successful steps on resume.
+`resume` never takes a cache hit. A fresh snapshot reruns every step to rebuild
+prerequisite outputs; only snapshot-disabled execution can retain successful
+steps. The original `reused_from` stays as history; consult step logs for resumed checks.
 
 Seed identity includes file bytes, paths, permissions and symlink targets, not
 just lockfiles or timestamps. A dependency edit with an unchanged lockfile must
 run fresh checks. Hashing reads the configured inputs but records only a digest,
 not their contents. External symlinks are allowed for execution but disable reuse.
-Writes to seeded caches during checks also disable reuse without failing an
-otherwise successful check. Prefer snapshot-local locked installs for Python
+Snapshot-local writes to dependency caches are outputs, not new inputs: they do
+not prevent reuse of a fully successful run with matching initial seeds. A cache
+hit returns verification results, not generated build artifacts. Prefer
+snapshot-local locked installs for Python
 virtualenvs whose scripts or symlinks refer to a different checkout.
 A plan whose env changes with the branch (for example a
 diff base) has a different plan hash, so it does not match. Repositories that
@@ -500,8 +502,9 @@ Purpose:
 Important behavior:
 - resume is strict and fail-closed
 - it refuses to continue if repo identity, SHA, config hash, or plan hash changed
-- interrupted and otherwise unfinished steps rerun while prior successful steps are reused
-- `--from-step <id>` records stale events, refreshes affected pending contexts, and reruns that step plus every dependent; unrelated successes are reused
+- snapshot execution reruns every step, rebuilding ignored prerequisite outputs
+- with `[snapshot] disabled`, unfinished steps rerun and prior successful steps are reused
+- `--from-step <id>` reruns that step and dependents selectively only with snapshots disabled; a fresh snapshot always reruns the complete plan
 - other unfinished/failed work is still reconsidered: this is not partial-plan verification
 - `--max-parallel 1` is a serial debugging fallback that does not bypass identity checks or change coverage
 - `--json` has the same final snapshot/output rules as `run --json`
@@ -787,8 +790,6 @@ It includes:
   published.
 - optional `seed_hash`: SHA-256 identity of the seeded files at execution start;
   empty when the inputs cannot be fingerprinted safely.
-- optional `tested_seed_hash`: the same seed identity verified at completion;
-  required for result reuse, including the empty-seed-set digest.
 - optional `reused_from`: `run_id`, `run_dir`, `head_sha` of the earlier run
   whose result this run reused instead of executing (see "Reusing a result").
 

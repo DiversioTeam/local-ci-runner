@@ -204,19 +204,18 @@ func TestStepThatChangesTheSnapshotFailsTheRunAndCannotBePublished(t *testing.T)
 	})
 }
 
-func TestResumeRecordsATestedTreeOnlyWhenEveryKeptSuccessWasSnapshotTested(t *testing.T) {
+func TestSnapshotResumeRerunsStepsFromEarlierAttempts(t *testing.T) {
 	t.Parallel()
 	plan := config.ResolvedPlan{Steps: []config.Step{
-		{ID: "first", Command: []string{"/bin/sh", "-c", "exit 0"}},
+		{ID: "first", Command: []string{"/bin/sh", "-c", `printf x >> "$LOCAL_CI_SOURCE_ROOT/.local-ci/first"`}},
 		{ID: "flaky", Needs: []string{"first"}, Command: []string{"/bin/sh", "-c", `test -f "$LOCAL_CI_SOURCE_ROOT/pass"`}},
 	}}
 	for _, testCase := range []struct {
 		name          string
 		firstSnapshot bool
-		wantTested    bool
 	}{
-		{name: "first attempt in a snapshot", firstSnapshot: true, wantTested: true},
-		{name: "first attempt in the live worktree", firstSnapshot: false, wantTested: false},
+		{name: "first attempt in a snapshot", firstSnapshot: true},
+		{name: "first attempt in the live worktree", firstSnapshot: false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
@@ -234,8 +233,12 @@ func TestResumeRecordsATestedTreeOnlyWhenEveryKeptSuccessWasSnapshotTested(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resumed.Summary.Status != string(StepStateSuccess) || (resumed.Meta.TestedTreeHash != "") != testCase.wantTested {
-				t.Fatalf("status = %s, tested tree = %q, want tested = %v", resumed.Summary.Status, resumed.Meta.TestedTreeHash, testCase.wantTested)
+			if resumed.Summary.Status != string(StepStateSuccess) || resumed.Meta.TestedTreeHash == "" {
+				t.Fatalf("status = %s, tested tree = %q", resumed.Summary.Status, resumed.Meta.TestedTreeHash)
+			}
+			executions, err := os.ReadFile(filepath.Join(root, ".local-ci", "first"))
+			if err != nil || string(executions) != "xx" {
+				t.Fatalf("snapshot resume retained earlier execution: %q %v", executions, err)
 			}
 		})
 	}
