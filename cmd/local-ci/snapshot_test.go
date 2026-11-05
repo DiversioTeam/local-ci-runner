@@ -145,6 +145,33 @@ command = ['sh', '-c', 'printf x >> "$LOCAL_CI_SOURCE_ROOT/.local-ci/executions"
 	if err := json.Unmarshal(stdout.Bytes(), &first); err != nil {
 		t.Fatal(err)
 	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := command.runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	var reused showJSON
+	if err := json.Unmarshal(stdout.Bytes(), &reused); err != nil {
+		t.Fatal(err)
+	}
+	if reused.Meta.ReusedFrom == nil || reused.Meta.ReusedFrom.RunID != first.RunID {
+		t.Fatal("unchanged seed inputs did not reuse the verified result")
+	}
+	clonedRoot := filepath.Join(t.TempDir(), "checkout")
+	runGit(t, root, "clone", root, clonedRoot)
+	runGit(t, clonedRoot, "remote", "set-url", "origin", "https://github.com/owner/repo.git")
+	writeFile(t, filepath.Join(clonedRoot, ".env"), []byte("good"))
+	stdout.Reset()
+	stderr.Reset()
+	if err := newCLI(&stdout, &stderr, clonedRoot).runWithContext(t.Context(), nil, []string{"run", "--no-github", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &reused); err != nil {
+		t.Fatal(err)
+	}
+	if reused.Meta.ReusedFrom == nil || reused.Meta.ReusedFrom.RunID != first.RunID {
+		t.Fatal("matching seeds did not reuse across checkouts")
+	}
 	writeFile(t, filepath.Join(root, ".env"), []byte("bad"))
 	stdout.Reset()
 	stderr.Reset()

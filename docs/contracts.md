@@ -72,14 +72,15 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 
 ### Result reuse
 
-A clean `run` with no configured snapshot seeds and no absolute step directories reuses an earlier run instead of executing when that run:
+A clean `run` with no absolute step directories reuses an earlier run instead of executing when that run:
 - finished with summary `success`, with no `snapshot_error`, and was not itself reused;
 - has `tested_tree_hash` equal to the current worktree tree;
-- has the same repo slug, repo-relative config location, `config_hash` and `plan_hash`. External config paths bypass reuse.
+- has the same repo slug, repo-relative config location, `config_hash` and `plan_hash`. External config paths bypass reuse;
+- has `tested_seed_hash` equal to the current `seed_hash`, including the digest of an empty seed set. Seed bytes, paths, permissions and link text participate; lockfiles alone are insufficient.
 
 It is found through a per-user index, one JSON file per key, written atomically after each qualifying run:
-`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>-<config_location_hash>.json`.
-Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `config_location`, `plan_hash` and `finished_at`. The location hash is SHA-256 of the repo-relative config path. Version 2 entries do not reuse the older location-free index.
+`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>-<input_hash>.json`.
+Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `config_location`, `seed_hash`, `plan_hash` and `finished_at`. The input hash is SHA-256 of the repo-relative config path, a NUL separator, and the seed hash. Version 3 entries do not reuse older entries without seed verification.
 
 The reusing run:
 - is a normal run directory whose `meta.json` has `reused_from` (`run_id`, `run_dir`, `head_sha`);
@@ -91,7 +92,7 @@ The reusing run:
 
 `reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
 
-An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, configured `snapshot.seed` paths, and `resume` bypass result reuse. Seeds always require fresh checks because their ignored contents are not part of the cache identity. Plans with absolute step directories also run fresh checks because directory validity depends on the destination checkout. Before fresh execution, the runner removes any older cached success for the same tree/config/location/plan and restores it only after verified success. Unsuccessful or fatal completion evicts again, removing any pass another checkout cached while this run was active. This also covers fatal persistence errors. If an existing valid cache entry cannot be removed, execution refuses rather than leave a stale pass reusable.
+An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` bypass whole-run result reuse. Seeds permit reuse only when safely fingerprinted and verified unchanged after execution. External/absolute symlinks, unreadable inputs, or changes during checks disable result reuse without failing otherwise successful checks. Changed or unverified seeds invalidate earlier successful steps on resume. If copied seeds differ from the captured source identity, execution refuses with a retry error. Plans with absolute step directories also run fresh checks because directory validity depends on the destination checkout. Before fresh execution, the runner removes any older cached success for the same tree/config/location/seeds/plan and restores it only after verified success. Unsuccessful or fatal completion evicts again, removing any pass another checkout cached while this run was active. This also covers fatal persistence errors. If an existing valid cache entry cannot be removed, execution refuses rather than leave a stale pass reusable.
 
 ## 2. Planner stdout
 

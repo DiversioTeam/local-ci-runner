@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // GetSeedHash fingerprints seed names, missing paths, modes, file contents and
@@ -119,7 +120,7 @@ func GetSeedHash(ctx context.Context, root string, seedPaths []string) (string, 
 				}
 				fmt.Fprintf(hash, "symlink %q\n", text)
 			case info.Mode().IsRegular():
-				digest, err := hashSeedFile(ctx, path, info, buffer)
+				digest, err := getSeedFileHash(ctx, path, info, buffer)
 				if err != nil {
 					return fmt.Errorf("path %q: hash regular file: %w", rel, err)
 				}
@@ -139,8 +140,9 @@ func GetSeedHash(ctx context.Context, root string, seedPaths []string) (string, 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
-func hashSeedFile(ctx context.Context, path string, info fs.FileInfo, buffer []byte) ([]byte, error) {
-	file, err := os.Open(path)
+func getSeedFileHash(ctx context.Context, path string, info fs.FileInfo, buffer []byte) ([]byte, error) {
+	// A concurrent replacement must not turn a regular-file read into a link traversal or FIFO wait.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}

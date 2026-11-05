@@ -59,8 +59,9 @@ type ExecuteOptions struct {
 
 // SnapshotOptions configures the immutable checkout for one execution.
 type SnapshotOptions struct {
-	Seed           []string
-	AllowPlainCopy bool
+	ExpectedSeedHash string
+	Seed             []string
+	AllowPlainCopy   bool
 }
 
 // ExecuteRun executes unfinished plan steps and persists their lifecycle.
@@ -126,6 +127,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		reusesEarlierSteps = reusesEarlierSteps || status.State == string(StepStateSuccess)
 	}
 	earlierTestedTree := run.Meta.TestedTreeHash
+	earlierTestedSeeds := run.Meta.TestedSeedHash
+	run.Meta.SeedHash, run.Meta.TestedSeedHash = "", ""
 	var snapshotDir string
 	if opts.Snapshot != nil {
 		// Claim the run before its snapshot exists, so another runner's
@@ -158,6 +161,22 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 				}
 			}()
 			opts.snapshot = &created
+			seedHash, hashError := snapshot.GetSeedHash(ctx, created.Dir, opts.Snapshot.Seed)
+			if hashError != nil {
+				printProgress(progress, "warning: seed inputs cannot be reused: %v\n", hashError)
+			} else {
+				if opts.Snapshot.ExpectedSeedHash != "" && seedHash != opts.Snapshot.ExpectedSeedHash {
+					return RunRecord{}, fmt.Errorf("seed inputs changed while creating snapshot; retry with stable dependencies")
+				}
+				run.Meta.SeedHash = seedHash
+			}
+			// Resumed successes cannot stand in for checks against different dependencies.
+			if earlierTestedSeeds == "" || earlierTestedSeeds != run.Meta.SeedHash {
+				for index := range run.StepStatuses {
+					run.StepStatuses[index].State = string(StepStateStale)
+				}
+				reusesEarlierSteps = false
+			}
 			printProgress(progress, "snapshot %s\n", created.Dir)
 		}
 	}
@@ -203,6 +222,14 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 			run.Meta.SnapshotError = err.Error()
 		} else if !reusesEarlierSteps || earlierTestedTree == opts.snapshot.TreeHash {
 			run.Meta.TestedTreeHash = opts.snapshot.TreeHash
+		}
+		if run.Meta.TestedTreeHash != "" && run.Meta.SeedHash != "" {
+			finishedSeedHash, hashError := snapshot.GetSeedHash(ctx, opts.snapshot.Dir, opts.Snapshot.Seed)
+			if hashError == nil && finishedSeedHash == run.Meta.SeedHash {
+				run.Meta.TestedSeedHash = finishedSeedHash
+			} else {
+				printProgress(progress, "warning: seeded inputs changed or became unreadable; result reuse disabled\n")
+			}
 		}
 	}
 	finishedAt := now()
