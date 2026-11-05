@@ -39,16 +39,17 @@ func isGitHubPostFailure(err error) bool {
 }
 
 const (
-	aggregateDescriptionRunning     = "local verification running"
-	aggregateDescriptionPassed      = "local verification passed"
-	aggregateDescriptionFailed      = "local verification failed"
-	aggregateDescriptionInterrupted = "local verification interrupted"
-	stepDescriptionRunning          = "running"
-	stepDescriptionPassed           = "passed"
-	stepDescriptionFailed           = "failed"
-	stepDescriptionInterrupted      = "interrupted"
-	stepDescriptionSkipped          = "skipped"
-	stepDescriptionBlocked          = "blocked"
+	aggregateDescriptionRunning         = "local verification running"
+	aggregateDescriptionPassed          = "local verification passed"
+	aggregateDescriptionFailed          = "local verification failed"
+	aggregateDescriptionInterrupted     = "local verification interrupted"
+	aggregateDescriptionSnapshotChanged = "checked code changed during local verification"
+	stepDescriptionRunning              = "running"
+	stepDescriptionPassed               = "passed"
+	stepDescriptionFailed               = "failed"
+	stepDescriptionInterrupted          = "interrupted"
+	stepDescriptionSkipped              = "skipped"
+	stepDescriptionBlocked              = "blocked"
 )
 
 func validateReporter(meta persistence.Meta, reporter ghstatus.Reporter) error {
@@ -80,6 +81,9 @@ func postAggregateStatus(
 		Context:     meta.GitHubAggregateContext,
 		State:       state,
 		Description: aggregateDescription(state),
+	}
+	if meta.SnapshotError != "" && state == ghstatus.StateError {
+		status.Description = aggregateDescriptionSnapshotChanged
 	}
 	return postGitHubStatus(ctx, reporter, appender, meta, "", status)
 }
@@ -184,7 +188,7 @@ func aggregateGitHubState(runStatus string) ghstatus.State {
 		return ghstatus.StateSuccess
 	case runStatusPending, string(StepStateRunning):
 		return ghstatus.StatePending
-	case string(StepStateInterrupted):
+	case string(StepStateInterrupted), RunStatusSnapshotChanged:
 		return ghstatus.StateError
 	default:
 		return ghstatus.StateFailure

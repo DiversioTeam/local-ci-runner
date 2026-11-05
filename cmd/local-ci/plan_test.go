@@ -21,7 +21,7 @@ func TestPlanAndRunJSONShareSnapshotAndDoNotMixProcessOutput(t *testing.T) {
 max_parallel = 2
 [[steps]]
 id = "first"
-command = ["sh", "-c", "touch .local-ci/check-executed; printf noisy-child-output; printf noisy-child-error >&2"]
+command = ["sh", "-c", "touch \"$LOCAL_CI_SOURCE_ROOT/.local-ci/check-executed\"; printf noisy-child-output; printf noisy-child-error >&2"]
 timeout = "5s"
 [[steps]]
 id = "second"
@@ -99,7 +99,7 @@ func TestPlannerCannotChangeTheCapturedSnapshotOrConfiguration(t *testing.T) {
 			store := persistence.NewStore(root)
 			configurationPath := filepath.Join(t.TempDir(), config.DefaultPath)
 			writeFile(t, configurationPath, []byte("version = 1\n[planner]\ncommand = ['sh', 'planner.sh']\n"))
-			plannerSource := "#!/bin/sh\nset -e\n" + testCase.command + "\necho planner-diagnostic >&2\nprintf '%s\\n' '{\"steps\":[{\"id\":\"test\",\"command\":[\"sh\",\"-c\",\"touch .local-ci/check-ran\"]}]}'\n"
+			plannerSource := "#!/bin/sh\nset -e\n" + testCase.command + "\necho planner-diagnostic >&2\nprintf '%s\\n' '{\"steps\":[{\"id\":\"test\",\"command\":[\"sh\",\"-c\",\"touch \\\"$LOCAL_CI_SOURCE_ROOT/.local-ci/check-ran\\\"\"]}]}'\n"
 			writeFile(t, filepath.Join(root, "planner.sh"), []byte(plannerSource))
 			for _, commandName := range []string{"plan", "run"} {
 				var stdout, stderr bytes.Buffer

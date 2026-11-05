@@ -14,6 +14,10 @@ import (
 
 const runStatusPending = "pending"
 
+// RunStatusSnapshotChanged is a finished run whose snapshot stopped holding
+// the tree it was created for. Its results describe unknown code.
+const RunStatusSnapshotChanged = "snapshot_changed"
+
 // ErrStoredSummaryMismatch reports disagreement between summary.json and its source artifacts.
 var ErrStoredSummaryMismatch = errors.New("stored summary mismatch")
 
@@ -425,8 +429,11 @@ func validateStoredSummary(meta persistence.Meta, summary persistence.Summary, s
 // BuildRunSummary uses the same persisted facts for execution and inspection.
 func BuildRunSummary(meta persistence.Meta, statuses []persistence.StepStatus) persistence.Summary {
 	summary := buildSummary(meta.RunID, statuses, meta.StartedAt, meta.FinishedAt)
-	if meta.Interrupted && meta.FinishedAt != nil {
+	switch {
+	case meta.Interrupted && meta.FinishedAt != nil:
 		summary.Status = string(StepStateInterrupted)
+	case meta.SnapshotError != "" && meta.FinishedAt != nil:
+		summary.Status = RunStatusSnapshotChanged
 	}
 	return summary
 }

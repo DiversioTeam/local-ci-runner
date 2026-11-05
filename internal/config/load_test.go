@@ -27,6 +27,22 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsSnapshotSeeds(t *testing.T) {
+	t.Parallel()
+
+	// A planner config may set [snapshot]; the planner's early return must not skip it.
+	cfg, err := Load(writeTempConfig(t, "version = 1\n[planner]\ncommand = ['./plan.sh']\n[snapshot]\nseed = ['.venv', 'frontend/node_modules']\nallow_plain_copy = true\n"))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Snapshot.Disabled || !cfg.Snapshot.AllowPlainCopy || strings.Join(cfg.Snapshot.Seed, ",") != ".venv,frontend/node_modules" {
+		t.Fatalf("snapshot = %+v", cfg.Snapshot)
+	}
+	if _, err := Load(writeTempConfig(t, "version = 1\n[planner]\ncommand = ['./plan.sh']\n[snapshot]\nseed = ['../x']\n")); err == nil {
+		t.Fatal("a planner config skipped snapshot validation")
+	}
+}
+
 func TestLoadAcceptsParallelismAndTimeouts(t *testing.T) {
 	t.Parallel()
 
@@ -74,6 +90,14 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 		{name: "zero timeout", content: step("timeout = '0s'"), wantError: "positive duration"},
 		{name: "negative timeout", content: step("timeout = '-1s'"), wantError: "positive duration"},
 		{name: "unparsable timeout", content: step("timeout = 'tomorrow'"), wantError: "positive duration"},
+		// Seed paths are cloned into the snapshot, so they must stay inside the repository and off runner-owned paths.
+		{name: "absolute seed", content: step("") + "[snapshot]\nseed = ['/etc']\n", wantError: "relative path inside the repository"},
+		{name: "escaping seed", content: step("") + "[snapshot]\nseed = ['../sibling']\n", wantError: "clean path inside the repository"},
+		{name: "unclean seed", content: step("") + "[snapshot]\nseed = ['./.venv']\n", wantError: "clean path inside the repository"},
+		{name: "git seed", content: step("") + "[snapshot]\nseed = ['.git']\n", wantError: "path the runner owns"},
+		{name: "runner seed", content: step("") + "[snapshot]\nseed = ['.local-ci/runs']\n", wantError: "path the runner owns"},
+		{name: "duplicate seed", content: step("") + "[snapshot]\nseed = ['.venv', '.venv']\n", wantError: "duplicate snapshot.seed"},
+		{name: "unknown snapshot field", content: step("") + "[snapshot]\nenabled = true\n", wantError: "unknown fields"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

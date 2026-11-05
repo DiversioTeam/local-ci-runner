@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -12,6 +13,9 @@ var stepIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 func (f File) validate() error {
 	if f.Version != 1 {
 		return fmt.Errorf("version must be 1")
+	}
+	if err := validateSnapshot(f.Snapshot); err != nil {
+		return err
 	}
 
 	if f.Planner != nil {
@@ -84,6 +88,26 @@ func validateStep(step Step) error {
 	}
 	if step.If != "" && step.If != "true" && step.If != "false" {
 		return fmt.Errorf("step %q if must be empty, \"true\", or \"false\"", step.ID)
+	}
+	return nil
+}
+
+func validateSnapshot(snapshot Snapshot) error {
+	seen := make(map[string]struct{}, len(snapshot.Seed))
+	for _, path := range snapshot.Seed {
+		clean := filepath.ToSlash(filepath.Clean(path))
+		switch {
+		case strings.TrimSpace(path) == "" || filepath.IsAbs(path):
+			return fmt.Errorf("snapshot.seed %q must be a relative path inside the repository", path)
+		case clean != filepath.ToSlash(path) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../"):
+			return fmt.Errorf("snapshot.seed %q must be a clean path inside the repository", path)
+		case clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == ".local-ci" || strings.HasPrefix(clean, ".local-ci/"):
+			return fmt.Errorf("snapshot.seed %q names a path the runner owns", path)
+		}
+		if _, ok := seen[clean]; ok {
+			return fmt.Errorf("duplicate snapshot.seed %q", path)
+		}
+		seen[clean] = struct{}{}
 	}
 	return nil
 }

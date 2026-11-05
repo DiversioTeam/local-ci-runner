@@ -144,7 +144,8 @@ discover repo
 -> load config
 -> resolve plan
 -> create run directory
--> execute steps
+-> create the snapshot (an immutable checkout of the captured tree)
+-> execute steps in the snapshot
 -> write logs and status
 -> finish with a final summary
 ```
@@ -160,6 +161,46 @@ Why the run id matters:
 - it is the handle you use for `resume`, `show`, and `logs`
 - it names the artifact directory
 - it lets another shell inspect the same run safely
+
+### Snapshots: the code a run tests
+
+Steps never run in your live worktree. Each attempt creates a detached Git
+worktree at `.local-ci/snapshots/<run-id>` holding exactly the captured tree
+(HEAD plus any dirty changes), runs every step there, and removes it when the
+attempt ends: on success, failure, interrupt, or a fatal error. A runner killed
+with SIGKILL leaves its snapshot behind; the next `run`/`resume` in that
+repository removes snapshots whose runner is gone.
+
+So you can keep editing, switch branches, or commit while a run is going: the
+result describes the tree it captured, and statuses go only to the commit with
+that tree.
+
+Before each step and before the final status, the runner checks the snapshot
+still has its HEAD and tree. If a step changed tracked or unignored files, the
+run finishes as `snapshot_changed` (aggregate `error`, "checked code changed
+during local verification"), later steps are blocked, and the run cannot be
+published. Write generated files to Git-ignored paths.
+
+Ignored inputs (virtualenvs, `node_modules`, build caches, local env files) are
+not in the tree. List the ones your checks need under `[snapshot] seed`; they
+are cloned copy-on-write (`clonefile(2)` on APFS on macOS,
+`cp --reflink=always` on Linux), so seeding costs little time or disk:
+
+```toml
+[snapshot]
+seed = [".venv", "node_modules", ".env"]
+# allow_plain_copy = true   # full copy when the filesystem cannot clone
+# disabled = true           # run in the live worktree (no tested tree)
+```
+
+Seed paths must be Git-ignored and absent from the tree. A path the live
+worktree lacks is skipped. Without copy-on-write support a path is skipped with
+a warning unless `allow_plain_copy = true`. Never symlink into the live
+worktree: an edit there would leak into the run. Outputs steps write inside the
+snapshot are discarded with it; keep results in `LOCAL_CI_STEP_DIR` or write to
+`LOCAL_CI_SOURCE_ROOT` deliberately. Git submodules are not checked out in a
+snapshot. The snapshot's HEAD is detached, so read the branch from your
+planner's env rather than `git rev-parse --abbrev-ref HEAD`.
 
 ---
 
@@ -666,6 +707,14 @@ It includes:
   means false. Each file has `path`, `status`, optional `previous_path`, `blob_hash`.
 - optional `github_enabled`, `github_aggregate_context`, `github_posting_suppressed`:
   execution-time settings, not publication evidence.
+- optional `snapshot_dir`: the immutable checkout the latest attempt's steps ran
+  in. It is removed when the attempt ends; the path is kept as a record.
+- optional `tested_tree_hash`: the tree every step was verified against. Set only
+  when the run executed in a snapshot that held that tree from creation to the
+  final status (see "Snapshots" below). Absent for `snapshot.disabled` runs.
+- optional `snapshot_error`: why the snapshot stopped holding its tree. Such a
+  run finishes as `snapshot_changed`, posts an `error` aggregate, and cannot be
+  published.
 
 `summary` fields: `run_id`, `status`, optional `started_at`, `finished_at`,
 `duration_millis`, `steps`, `counts`, and `metadata`. Each summary step has
@@ -971,6 +1020,8 @@ Config rules:
 - Each step requires a unique `id` and nonempty argv `command`.
 - Top-level `max_parallel` is a positive integer, default 1; do not put it under `[github]`. A CLI `--max-parallel` override changes scheduling only.
 - Optional step fields: `name`, `dir`, `needs`, `if`, `github_context`, `env`, `timeout`.
+- Optional `[snapshot]`: `seed` (Git-ignored paths cloned into each snapshot),
+  `allow_plain_copy`, `disabled`. See "Snapshots" in section 4.
 - `timeout` is a positive Go duration such as `30s` or `10m`; omitted/empty means no deadline. Static and planner steps use the same contract.
 - IDs use letters/digits followed by letters/digits, dots, underscores, or hyphens.
 - `dir` defaults to the repo root; relative directories are repo-root relative.
@@ -1022,7 +1073,10 @@ including during publish eligibility checks.
 Environment supplied to the planner: `LOCAL_CI_REPO_ROOT`, `LOCAL_CI_CONFIG`,
 `LOCAL_CI_GITHUB_REPO`, `LOCAL_CI_GITHUB_SHA`.
 
-Additional step variables: `LOCAL_CI_RUN_ID`, `LOCAL_CI_RUN_DIR`,
+Steps run in the run's snapshot, so for steps `LOCAL_CI_REPO_ROOT` is the
+snapshot root; `LOCAL_CI_SOURCE_ROOT` is always the live repository root.
+
+Additional step variables: `LOCAL_CI_SOURCE_ROOT`, `LOCAL_CI_RUN_ID`, `LOCAL_CI_RUN_DIR`,
 `LOCAL_CI_PLAN_FILE`, `LOCAL_CI_PLAN_ENV`, `LOCAL_CI_STEP_ID`,
 `LOCAL_CI_STEP_NAME`, `LOCAL_CI_STEP_INDEX`, `LOCAL_CI_STEP_DIR`,
 `LOCAL_CI_STEP_OUTPUT`. Write `KEY=VALUE` lines to `LOCAL_CI_STEP_OUTPUT` for

@@ -11,7 +11,24 @@ type File struct {
 	MaxParallel int      `toml:"max_parallel" json:"max_parallel,omitempty"`
 	Planner     *Planner `toml:"planner" json:"planner,omitempty"`
 	GitHub      GitHub   `toml:"github" json:"github"`
+	Snapshot    Snapshot `toml:"snapshot" json:"snapshot"`
 	Steps       []Step   `toml:"steps" json:"steps,omitempty"`
+}
+
+// Snapshot controls the immutable checkout that steps run in.
+//
+// Steps run in a detached Git worktree of the exact tree being verified, so an
+// edit, checkout, or commit in the live worktree during a run cannot change
+// what is tested. Seed lists Git-ignored paths (virtualenvs, node_modules,
+// build caches, env files) copied into the snapshot with copy-on-write clones.
+type Snapshot struct {
+	// Disabled runs steps in the live worktree, as before snapshots existed.
+	// Such runs record no tested tree and post with the old, weaker guarantee.
+	Disabled bool `toml:"disabled" json:"disabled,omitempty"`
+	// Seed are repo-relative, Git-ignored paths cloned into each snapshot.
+	Seed []string `toml:"seed" json:"seed,omitempty"`
+	// AllowPlainCopy permits a full copy when the filesystem cannot clone.
+	AllowPlainCopy bool `toml:"allow_plain_copy" json:"allow_plain_copy,omitempty"`
 }
 
 type Planner struct {

@@ -57,6 +57,16 @@ env = { MODE = "fast" }
 - Consumer repos must order steps sharing databases, generated files, build directories, or other mutable resources; missing dependency edges are not proof of resource independence.
 - `github_context` is optional; if missing, the runner defaults to `local/<step-id>`.
 - `if` currently supports only `true` and `false`.
+- `[snapshot]` is optional: `seed` lists repo-relative, Git-ignored paths cloned copy-on-write into each snapshot; `allow_plain_copy` permits a full copy when cloning is impossible; `disabled = true` runs steps in the live worktree and records no tested tree. Seed paths must be clean, relative, unique, and outside `.git` and `.local-ci`.
+
+### Snapshot
+
+Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that holds exactly the captured tree (`worktree_tree_hash`: HEAD plus dirty changes). The runner:
+- creates it before the first step, after the planner, and refuses to start if it cannot prove the snapshot holds that tree
+- clones `seed` paths into it with `clonefile(2)` (macOS APFS, one call per path) or `cp --reflink=always` (Linux), never symlinks; either fails rather than silently copying
+- checks the snapshot's HEAD and tree before each step and before the final aggregate status; a mismatch blocks remaining steps and finishes the run as `snapshot_changed` with an `error` aggregate, and the run cannot be published
+- removes it on every exit (success, failure, interrupt, fatal error), and at the start of `run`/`resume` removes snapshots whose runner is gone
+- records `tested_tree_hash` only when the whole run executed in a snapshot that held that tree throughout; successes reused by `resume` count only if the earlier attempt also recorded that tree
 
 ## 2. Planner stdout
 
@@ -101,7 +111,8 @@ For each step the engine will:
 
 #### Common
 - `LOCAL_CI_RUN_ID`
-- `LOCAL_CI_REPO_ROOT`
+- `LOCAL_CI_REPO_ROOT` (for steps: the snapshot root)
+- `LOCAL_CI_SOURCE_ROOT` (steps only: the live repository root)
 - `LOCAL_CI_CONFIG`
 - `LOCAL_CI_RUN_DIR`
 - `LOCAL_CI_PLAN_FILE`
@@ -170,12 +181,16 @@ Stores immutable run identity and the trust snapshot for that run:
 - `github_posting_suppressed` when the run skipped GitHub posting or stopped after a post failure
 - `max_parallel`: actual worker limit for this execution; absent/zero in legacy metadata means `1`
 - `interrupted`: run cancellation, including before any step starts; absent means false
+- `snapshot_dir`: where the latest attempt's steps ran (removed afterwards)
+- `tested_tree_hash`: the tree the whole run was verified against, when it ran in a snapshot throughout
+- `snapshot_error`: why the snapshot stopped holding its tree; the run status is then `snapshot_changed`
 
 Known suppression reasons are `dirty_worktree`, `cli_disabled`, and `post_failed`.
 
 Why the extra snapshot fields exist:
 - `HEAD SHA` answers "which commit was checked out?"
-- `worktree_tree_hash` answers "what exact code snapshot actually ran?"
+- `worktree_tree_hash` answers "what exact code snapshot was captured?"
+- `tested_tree_hash` answers "which tree did every step provably run on?"
 - `dirty_files[]` answers "what was locally different from HEAD?"
 
 ### `status.json`
@@ -300,7 +315,7 @@ Implementation note:
 ### Target resolution
 
 Clean-worktree rule:
-- when GitHub posting happens during `local-ci run`, the status target is the current `HEAD` commit
+- when GitHub posting happens during `local-ci run`, the status target is the `HEAD` commit captured at the start, whose tree the snapshot holds; the live worktree may change during the run without affecting what was tested
 - when the worktree is dirty, the runner must not post to GitHub during execution
 - a later `local-ci publish <run-id>` may post only if the current clean `HEAD^{tree}` exactly matches the stored run snapshot
 

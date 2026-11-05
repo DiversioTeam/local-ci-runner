@@ -47,6 +47,15 @@ type Meta struct {
 	DirtyWorktree           bool           `json:"dirty_worktree,omitempty"`
 	DirtyFiles              []WorktreeFile `json:"dirty_files,omitempty"`
 	GitHubPostingSuppressed string         `json:"github_posting_suppressed,omitempty"`
+	// SnapshotDir is the immutable checkout the latest attempt's steps ran in.
+	// It is removed when the attempt ends; the path stays as a record.
+	SnapshotDir string `json:"snapshot_dir,omitempty"`
+	// TestedTreeHash is the tree every step of this run was verified against,
+	// set only when the whole run executed in a snapshot that held that tree
+	// from creation to the final status.
+	TestedTreeHash string `json:"tested_tree_hash,omitempty"`
+	// SnapshotError explains why the snapshot stopped matching the tree.
+	SnapshotError string `json:"snapshot_error,omitempty"`
 }
 
 type Summary struct {
