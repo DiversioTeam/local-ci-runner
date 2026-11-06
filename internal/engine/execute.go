@@ -59,8 +59,9 @@ type ExecuteOptions struct {
 
 // SnapshotOptions configures the immutable checkout for one execution.
 type SnapshotOptions struct {
-	Seed           []string
-	AllowPlainCopy bool
+	ExpectedSeedHash string
+	Seed             []string
+	AllowPlainCopy   bool
 }
 
 // ExecuteRun executes unfinished plan steps and persists their lifecycle.
@@ -83,8 +84,8 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 		}
 		run.StepStatuses = statuses
 	}
-	// Interrupted snapshot attempts may never reach final verification; none of their successes are trusted.
-	if run.Meta.SnapshotError != "" || run.Meta.SnapshotDir != "" && run.Meta.TestedTreeHash != run.Meta.WorktreeTreeHash {
+	// A fresh snapshot has none of the earlier steps' generated files, so rebuild every prerequisite.
+	if opts.Snapshot != nil || run.Meta.SnapshotError != "" || run.Meta.SnapshotDir != "" && run.Meta.TestedTreeHash != run.Meta.WorktreeTreeHash {
 		for index := range run.StepStatuses {
 			run.StepStatuses[index].State = string(StepStateStale)
 		}
@@ -119,13 +120,7 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if err := validateReporter(run.Meta, opts.Reporter); err != nil {
 		return RunRecord{}, err
 	}
-	// Successful steps kept from an earlier attempt count toward a tested tree
-	// only if that attempt itself finished with the tree verified.
-	reusesEarlierSteps := false
-	for _, status := range run.StepStatuses {
-		reusesEarlierSteps = reusesEarlierSteps || status.State == string(StepStateSuccess)
-	}
-	earlierTestedTree := run.Meta.TestedTreeHash
+	run.Meta.SeedHash = ""
 	var snapshotDir string
 	if opts.Snapshot != nil {
 		// Claim the run before its snapshot exists, so another runner's
@@ -158,6 +153,18 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 				}
 			}()
 			opts.snapshot = &created
+			seedHash, hashError := snapshot.GetSeedHash(ctx, created.Dir, opts.Snapshot.Seed)
+			if hashError != nil && ctx.Err() == nil {
+				if opts.Snapshot.ExpectedSeedHash != "" {
+					return RunRecord{}, fmt.Errorf("seed inputs changed or cannot be verified after copying: %w", hashError)
+				}
+				printProgress(progress, "warning: seed inputs cannot be reused: %v\n", hashError)
+			} else if hashError == nil && opts.Snapshot.ExpectedSeedHash != "" && ctx.Err() == nil {
+				if seedHash != opts.Snapshot.ExpectedSeedHash {
+					return RunRecord{}, fmt.Errorf("seed inputs changed while creating snapshot; retry with stable dependencies")
+				}
+				run.Meta.SeedHash = seedHash
+			}
 			printProgress(progress, "snapshot %s\n", created.Dir)
 		}
 	}
@@ -201,7 +208,7 @@ func ExecuteRun(ctx context.Context, store persistence.Store, run RunRecord, opt
 	if opts.snapshot != nil && ctx.Err() == nil && run.Meta.SnapshotError == "" {
 		if err := opts.snapshot.Verify(ctx); err != nil {
 			run.Meta.SnapshotError = err.Error()
-		} else if !reusesEarlierSteps || earlierTestedTree == opts.snapshot.TreeHash {
+		} else {
 			run.Meta.TestedTreeHash = opts.snapshot.TreeHash
 		}
 	}

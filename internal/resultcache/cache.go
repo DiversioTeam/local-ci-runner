@@ -14,7 +14,7 @@ import (
 )
 
 // Version is the entry format. Entries with another version are ignored.
-const Version = 2
+const Version = 3
 
 // Entry points at one finished, all-success run that executed in a snapshot
 // holding TestedTreeHash.
@@ -28,6 +28,7 @@ type Entry struct {
 	TestedTreeHash string    `json:"tested_tree_hash"`
 	ConfigHash     string    `json:"config_hash"`
 	ConfigLocation string    `json:"config_location"`
+	SeedHash       string    `json:"seed_hash"`
 	PlanHash       string    `json:"plan_hash"`
 	FinishedAt     time.Time `json:"finished_at"`
 }
@@ -38,6 +39,7 @@ type Key struct {
 	TestedTreeHash string
 	ConfigHash     string
 	ConfigLocation string
+	SeedHash       string
 	PlanHash       string
 }
 
@@ -70,7 +72,7 @@ func Path(root string, key Key) (string, error) {
 	if !slugPattern.MatchString(key.RepoSlug) || strings.Contains(key.RepoSlug, "..") {
 		return "", fmt.Errorf("invalid repository slug %q", key.RepoSlug)
 	}
-	for name, value := range map[string]string{"tree": key.TestedTreeHash, "config hash": key.ConfigHash, "plan hash": key.PlanHash} {
+	for name, value := range map[string]string{"tree": key.TestedTreeHash, "config hash": key.ConfigHash, "plan hash": key.PlanHash, "seed hash": key.SeedHash} {
 		if !hexPattern.MatchString(value) {
 			return "", fmt.Errorf("invalid %s %q", name, value)
 		}
@@ -78,8 +80,8 @@ func Path(root string, key Key) (string, error) {
 	if !filepath.IsLocal(key.ConfigLocation) {
 		return "", fmt.Errorf("invalid config location %q", key.ConfigLocation)
 	}
-	locationHash := sha256.Sum256([]byte(key.ConfigLocation))
-	return filepath.Join(root, filepath.FromSlash(key.RepoSlug), key.TestedTreeHash, fmt.Sprintf("%s-%s-%x.json", key.ConfigHash, key.PlanHash, locationHash)), nil
+	inputHash := sha256.Sum256([]byte(key.ConfigLocation + "\x00" + key.SeedHash))
+	return filepath.Join(root, filepath.FromSlash(key.RepoSlug), key.TestedTreeHash, fmt.Sprintf("%s-%s-%x.json", key.ConfigHash, key.PlanHash, inputHash)), nil
 }
 
 // Record writes the entry atomically, replacing any earlier one for its key.
@@ -127,5 +129,5 @@ func Forget(root string, key Key) error {
 }
 
 func (entry Entry) key() Key {
-	return Key{RepoSlug: entry.RepoSlug, TestedTreeHash: entry.TestedTreeHash, ConfigHash: entry.ConfigHash, ConfigLocation: entry.ConfigLocation, PlanHash: entry.PlanHash}
+	return Key{RepoSlug: entry.RepoSlug, TestedTreeHash: entry.TestedTreeHash, ConfigHash: entry.ConfigHash, ConfigLocation: entry.ConfigLocation, SeedHash: entry.SeedHash, PlanHash: entry.PlanHash}
 }

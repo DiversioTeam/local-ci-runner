@@ -21,6 +21,7 @@ type RunIdentity struct {
 	ConfigHash       string
 	PlanHash         string
 	WorktreeTreeHash string
+	SeedHash         string
 }
 
 func BuildRunIdentity(repoRoot string, repoSlug string, headSHA string, configPath string, plan config.ResolvedPlan) (RunIdentity, error) {

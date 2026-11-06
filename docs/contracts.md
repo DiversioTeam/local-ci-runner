@@ -57,7 +57,7 @@ env = { MODE = "fast" }
 - Consumer repos must order steps sharing databases, generated files, build directories, or other mutable resources; missing dependency edges are not proof of resource independence.
 - `github_context` is optional; if missing, the runner defaults to `local/<step-id>`.
 - `if` currently supports only `true` and `false`.
-- `[snapshot]` is optional: `seed` lists repo-relative, Git-ignored paths cloned copy-on-write into each snapshot; `allow_plain_copy` permits a full copy when cloning is impossible; `disabled = true` runs steps in the live worktree and records no tested tree. Seed paths must be clean, relative, unique, and outside `.git` and `.local-ci`.
+- `[snapshot]` is optional: `seed` lists repo-relative, Git-ignored paths cloned copy-on-write into each snapshot; `allow_plain_copy` permits a full copy when cloning is impossible (otherwise an existing seed that cannot be cloned refuses execution); `disabled = true` runs steps in the live worktree and records no tested tree. Seed paths must be clean, relative, unique, and outside `.git` and `.local-ci`.
 
 ### Snapshot
 
@@ -66,20 +66,21 @@ Steps run in a detached Git worktree at `.local-ci/snapshots/<run-id>` that hold
 - clones `seed` paths into it with `clonefile(2)` (macOS APFS, one call per path) or `cp --reflink=always` (Linux); copied symlinks into live source or with unreadable targets are refused, while snapshot-local links and external tool links are allowed
 - checks the snapshot's HEAD and tree before each step and before the final aggregate status; a mismatch blocks remaining steps and finishes the run as `snapshot_changed` with an `error` aggregate, and the run cannot be published
 - removes it on every exit (success, failure, interrupt, fatal error), and at the start of `run`/`resume` removes snapshots whose runner is gone
-- records `tested_tree_hash` only when the whole run executed in a snapshot that held that tree throughout; successes reused by `resume` count only if the earlier attempt also recorded that tree
-- on resume after `snapshot_changed` or a snapshot attempt without a verified matching tree (including interruption), reruns every step instead of reusing unverified results, even when `--from-step` selects a later step; legacy/live-worktree attempts retain their existing behavior
+- records `tested_tree_hash` only when the whole run executed in a snapshot that held that tree throughout
+- on every snapshot resume, reruns the complete plan even with `--from-step`, because fresh snapshots lack previous generated prerequisite files; snapshot-disabled execution retains selective resume
 - cancellation during snapshot creation records a finished, interrupted run and the signal exit code, just like cancellation during a step
 
 ### Result reuse
 
-A clean `run` with no configured snapshot seeds and no absolute step directories reuses an earlier run instead of executing when that run:
+A clean `run` with no absolute step directories reuses an earlier run instead of executing when that run:
 - finished with summary `success`, with no `snapshot_error`, and was not itself reused;
 - has `tested_tree_hash` equal to the current worktree tree;
-- has the same repo slug, repo-relative config location, `config_hash` and `plan_hash`. External config paths bypass reuse.
+- has the same repo slug, repo-relative config location, `config_hash` and `plan_hash`. External config paths bypass reuse;
+- has initial `seed_hash` equal to the current `seed_hash`, including the digest of an empty seed set, verified against the copied inputs before execution. Seed bytes, paths, permissions and link text participate; lockfiles alone are insufficient.
 
 It is found through a per-user index, one JSON file per key, written atomically after each qualifying run:
-`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>-<config_location_hash>.json`.
-Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `config_location`, `plan_hash` and `finished_at`. The location hash is SHA-256 of the repo-relative config path. Version 2 entries do not reuse the older location-free index.
+`<os.UserCacheDir>/local-ci-runner/results/<owner>/<repo>/<tested_tree_hash>/<config_hash>-<plan_hash>-<input_hash>.json`.
+Each file holds `version`, `repo_slug`, `repo_root`, `run_id`, `run_dir`, `head_sha`, `tested_tree_hash`, `config_hash`, `config_location`, `seed_hash`, `plan_hash` and `finished_at`. The input hash is SHA-256 of the repo-relative config path, a NUL separator, and the seed hash. Version 3 entries do not reuse older entries without seed verification.
 
 The reusing run:
 - is a normal run directory whose `meta.json` has `reused_from` (`run_id`, `run_dir`, `head_sha`);
@@ -91,7 +92,7 @@ The reusing run:
 
 `reused_from` remains historical provenance after resume; it does not mean the latest attempt executed no checks.
 
-An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, configured `snapshot.seed` paths, and `resume` bypass result reuse. Seeds always require fresh checks because their ignored contents are not part of the cache identity. Plans with absolute step directories also run fresh checks because directory validity depends on the destination checkout. Before fresh execution, the runner removes any older cached success for the same tree/config/location/plan and restores it only after verified success. Unsuccessful or fatal completion evicts again, removing any pass another checkout cached while this run was active. This also covers fatal persistence errors. If an existing valid cache entry cannot be removed, execution refuses rather than leave a stale pass reusable.
+An entry whose run is missing, fails to load, has unreadable step outputs, or no longer qualifies is removed, and the checks run. Source outputs are checked before choosing reuse; destination-write and publication errors are not treated as cache misses. `--no-reuse`, a dirty worktree, `[snapshot] disabled`, and `resume` bypass whole-run result reuse. Seeds permit whole-run reuse when their initial contents are safely fingerprinted and verified against the copy before execution. Snapshot-local writes are plan outputs and do not prevent reuse of a fully successful result. A cache hit restores verification results, not generated files. External/absolute symlinks or unreadable initial inputs disable reuse without failing otherwise successful checks. Multiple regular-file paths sharing an inode anywhere in the configured seeds also disable reuse: Linux directory copies preserve aliases, while separate seed copies and Darwin copy methods can break them. Hard links solely to paths outside the configured seeds (such as an external pnpm store) do not disable reuse. These cases still execute fresh checks, even if copying makes the inputs fingerprintable; a copied hash never substitutes for a missing initial hash. If initially fingerprinted seeds differ or become unreadable in the copy, execution refuses with a retry error. Plans with absolute step directories also run fresh checks because directory validity depends on the destination checkout. Before fresh execution, the runner removes any older cached success for the same tree/config/location/seeds/plan and restores it only after verified success. Unsuccessful or fatal completion evicts again, removing any pass another checkout cached while this run was active. This also covers fatal persistence errors. If an existing valid cache entry cannot be removed, execution refuses rather than leave a stale pass reusable.
 
 ## 2. Planner stdout
 
@@ -166,7 +167,7 @@ The scheduler alone writes statuses, summaries, events, and GitHub receipts. Wor
 
 `plan [--json]` executes the planner but not verification steps, creates no run artifacts, and posts no statuses. It exposes snapshot/config/plan identity, `max_parallel`, and the complete plan. Planner code may have side effects; this is not guaranteed read-only inspection. Preparation refuses changes to repository identity, HEAD, worktree snapshot, or configuration during planning, before starting checks or creating a run. Generated outputs must use ignored or runner-artifact paths.
 
-`resume --from-step <id>` records stale events and refreshes pending contexts for that step and all dependents, then reruns them while reusing unrelated successes. Other unfinished/failed work is also reconsidered. No partial-plan verification command is provided.
+With snapshots disabled, `resume --from-step <id>` records stale events and refreshes pending contexts for that step and all dependents, then reruns them while reusing unrelated successes. Other unfinished/failed work is also reconsidered. Snapshot execution always rebuilds every prerequisite by rerunning the complete plan. No partial-plan verification command is provided.
 
 ## 4. Run artifacts
 

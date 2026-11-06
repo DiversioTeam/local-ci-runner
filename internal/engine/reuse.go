@@ -47,6 +47,8 @@ func CheckReusable(source RunRecord, run RunRecord) error {
 		return fmt.Errorf("run %s used another or external configuration location", source.RunID)
 	case sourceMeta.ConfigHash != meta.ConfigHash:
 		return fmt.Errorf("run %s used another configuration", source.RunID)
+	case meta.SeedHash == "" || sourceMeta.SeedHash != meta.SeedHash:
+		return fmt.Errorf("run %s did not verify the current seeded inputs", source.RunID)
 	case sourceMeta.PlanHash != meta.PlanHash:
 		return fmt.Errorf("run %s used another plan", source.RunID)
 	case len(source.StepStatuses) != len(run.StepStatuses):

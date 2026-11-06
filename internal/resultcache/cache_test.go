@@ -14,6 +14,7 @@ const (
 	tree       = "1111111111111111111111111111111111111111"
 	configHash = "2222222222222222222222222222222222222222222222222222222222222222"
 	planHash   = "3333333333333333333333333333333333333333333333333333333333333333"
+	seedHash   = "4444444444444444444444444444444444444444444444444444444444444444"
 )
 
 func newEntry() Entry {
@@ -22,6 +23,7 @@ func newEntry() Entry {
 		HeadSHA: "4444444444444444444444444444444444444444", TestedTreeHash: tree, ConfigHash: configHash, PlanHash: planHash,
 		FinishedAt:     time.Date(2026, 6, 27, 15, 4, 5, 0, time.UTC),
 		ConfigLocation: ".local-ci.toml",
+		SeedHash:       seedHash,
 	}
 }
 
@@ -33,7 +35,7 @@ func TestRecordThenLookupFindsOnlyTheSameKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The path is the documented layout, built literally rather than from Path.
-	want := filepath.Join(root, "owner", "repo", tree, fmt.Sprintf("%s-%s-%x.json", configHash, planHash, sha256.Sum256([]byte(".local-ci.toml"))))
+	want := filepath.Join(root, "owner", "repo", tree, fmt.Sprintf("%s-%s-%x.json", configHash, planHash, sha256.Sum256([]byte(".local-ci.toml\x00"+seedHash))))
 	if _, err := os.Stat(want); err != nil {
 		t.Fatalf("entry not at the documented path: %v", err)
 	}
@@ -42,12 +44,16 @@ func TestRecordThenLookupFindsOnlyTheSameKey(t *testing.T) {
 		t.Fatalf("Lookup() = %+v, %v, %v", got, found, err)
 	}
 	for name, key := range map[string]Key{
+		"other seeds":    {RepoSlug: "owner/repo", TestedTreeHash: tree, ConfigHash: configHash, PlanHash: planHash, SeedHash: strings.Repeat("8", 64)},
 		"other location": {RepoSlug: "owner/repo", TestedTreeHash: tree, ConfigHash: configHash, ConfigLocation: "other/ci.toml", PlanHash: planHash},
 		"other tree":     {RepoSlug: "owner/repo", TestedTreeHash: strings.Repeat("5", 40), ConfigHash: configHash, PlanHash: planHash},
 		"other config":   {RepoSlug: "owner/repo", TestedTreeHash: tree, ConfigHash: strings.Repeat("5", 64), PlanHash: planHash},
 		"other plan":     {RepoSlug: "owner/repo", TestedTreeHash: tree, ConfigHash: configHash, PlanHash: strings.Repeat("5", 64)},
 		"other repo":     {RepoSlug: "owner/other", TestedTreeHash: tree, ConfigHash: configHash, PlanHash: planHash},
 	} {
+		if key.SeedHash == "" {
+			key.SeedHash = seedHash
+		}
 		if key.ConfigLocation == "" {
 			key.ConfigLocation = ".local-ci.toml"
 		}
@@ -73,7 +79,7 @@ func TestLookupIgnoresEntriesThatDoNotMatchTheirPath(t *testing.T) {
 	}
 	for name, content := range map[string]string{
 		"future version":   `{"version":999,"config_location":".local-ci.toml","repo_slug":"owner/repo","tested_tree_hash":"` + tree + `","config_hash":"` + configHash + `","plan_hash":"` + planHash + `"}`,
-		"copied elsewhere": `{"version":2,"config_location":".local-ci.toml","repo_slug":"owner/repo","tested_tree_hash":"` + strings.Repeat("9", 40) + `","config_hash":"` + configHash + `","plan_hash":"` + planHash + `"}`,
+		"copied elsewhere": `{"version":3,"seed_hash":"` + seedHash + `","config_location":".local-ci.toml","repo_slug":"owner/repo","tested_tree_hash":"` + strings.Repeat("9", 40) + `","config_hash":"` + configHash + `","plan_hash":"` + planHash + `"}`,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

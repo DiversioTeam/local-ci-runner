@@ -86,6 +86,7 @@ func PrepareRun(store persistence.Store, opts PrepareOptions) (RunRecord, error)
 		HeadSHA:                 opts.Identity.HeadSHA,
 		ConfigPath:              opts.Identity.ConfigPath,
 		ConfigHash:              opts.Identity.ConfigHash,
+		SeedHash:                opts.Identity.SeedHash,
 		PlanHash:                opts.Identity.PlanHash,
 		GitHubEnabled:           githubConfig.Enabled,
 		GitHubAggregateContext:  githubConfig.AggregateContext,

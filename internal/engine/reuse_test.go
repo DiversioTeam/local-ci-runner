@@ -11,6 +11,7 @@ import (
 	"github.com/DiversioTeam/local-ci-runner/internal/config"
 	ghstatus "github.com/DiversioTeam/local-ci-runner/internal/github"
 	"github.com/DiversioTeam/local-ci-runner/internal/persistence"
+	"github.com/DiversioTeam/local-ci-runner/internal/snapshot"
 )
 
 // newReusePair runs a plan once in a snapshot (the source) and prepares a second run of the same
@@ -18,11 +19,15 @@ import (
 func newReusePair(t *testing.T, plan config.ResolvedPlan, githubConfig config.GitHub, suppressed string) (persistence.Store, RunRecord, RunRecord) {
 	t.Helper()
 	_, store, run := newSnapshotRun(t, plan, config.GitHub{}, "")
-	source, err := ExecuteRun(t.Context(), store, run, ExecuteOptions{Snapshot: &SnapshotOptions{}})
+	seedHash, err := snapshot.GetSeedHash(t.Context(), run.Meta.RepoRoot, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := RunIdentity{RepoRoot: run.Meta.RepoRoot, RepoSlug: run.Meta.RepoSlug, HeadSHA: "5555555555555555555555555555555555555555", ConfigPath: run.Meta.ConfigPath, ConfigHash: run.Meta.ConfigHash, PlanHash: run.Meta.PlanHash, WorktreeTreeHash: run.Meta.WorktreeTreeHash}
+	source, err := ExecuteRun(t.Context(), store, run, ExecuteOptions{Snapshot: &SnapshotOptions{ExpectedSeedHash: seedHash}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := RunIdentity{RepoRoot: run.Meta.RepoRoot, RepoSlug: run.Meta.RepoSlug, HeadSHA: "5555555555555555555555555555555555555555", ConfigPath: run.Meta.ConfigPath, ConfigHash: run.Meta.ConfigHash, PlanHash: run.Meta.PlanHash, WorktreeTreeHash: run.Meta.WorktreeTreeHash, SeedHash: source.Meta.SeedHash}
 	if githubConfig.Enabled && githubConfig.AggregateContext == "" {
 		githubConfig.AggregateContext = config.DefaultAggregateContext
 	}
@@ -120,6 +125,8 @@ func TestCheckReusableRequiresTheSameProvenResult(t *testing.T) {
 		{name: "snapshot changed", mutate: func(source *RunRecord, _ *RunRecord) { source.Meta.SnapshotError = "snapshot changed" }, want: "snapshot changed"},
 		{name: "itself reused", mutate: func(source *RunRecord, _ *RunRecord) { source.Meta.ReusedFrom = &persistence.ReusedFrom{RunID: "x"} }, want: "reuse the original"},
 		{name: "not in a snapshot", mutate: func(source *RunRecord, _ *RunRecord) { source.Meta.TestedTreeHash = "" }, want: "did not run in a snapshot"},
+		{name: "other seeds", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.SeedHash = strings.Repeat("9", 64) }, want: "seeded inputs"},
+		{name: "unverified seeds", mutate: func(source *RunRecord, _ *RunRecord) { source.Meta.SeedHash = "" }, want: "seeded inputs"},
 		{name: "other tree", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.WorktreeTreeHash = strings.Repeat("6", 40) }, want: "tested tree"},
 		{name: "dirty candidate", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.DirtyWorktree = true }, want: "tested tree"},
 		{name: "other repo", mutate: func(_ *RunRecord, candidate *RunRecord) { candidate.Meta.RepoSlug = "owner/other" }, want: "belongs to"},

@@ -117,7 +117,7 @@ It:
 - executes black-box steps in an immutable snapshot of the captured tree, so
   edits, checkouts and commits during a run cannot change what was tested
 - reuses a passing result for a tree it already checked, on any branch or
-  worktree, instead of running the checks again (snapshot seeds or absolute step directories require fresh checks)
+  worktree, when seeded dependency contents also match (absolute step directories require fresh checks)
 - writes run artifacts under `.local-ci/runs/<run-id>/`
 - optionally posts GitHub commit statuses for the verified snapshot
 
@@ -167,7 +167,9 @@ local-ci run --no-github
 
 SIGINT or SIGTERM stops all active steps—including their process groups on macOS
 and Linux—persists the run as `interrupted`, and lets
-`local-ci resume <run-id>` rerun unfinished work.
+`local-ci resume <run-id>` rerun the full plan in a fresh snapshot, rebuilding
+prerequisite outputs. With snapshots disabled, resume reruns unfinished work
+and can retain earlier successes.
 
 A GitHub status-post failure is recorded and disables further posting without
 stopping local checks. Fix auth or connectivity, then publish the completed run.

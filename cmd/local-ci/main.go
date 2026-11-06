@@ -345,8 +345,7 @@ func (c *cli) runCommand(commandContext context.Context, forceStop <-chan struct
 // same tree, configuration, and plan, from any branch or worktree of this
 // repository on this machine. Anything doubtful falls back to a real run.
 func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts executionCLIOptions) (engine.RunRecord, bool) {
-	// Seed contents are not in the captured tree; they cannot share a result keyed only by that tree.
-	if opts.noReuse || inputs.configuration.Snapshot.Disabled || len(inputs.configuration.Snapshot.Seed) > 0 || inputs.repository.DirtyWorktree {
+	if opts.noReuse || inputs.configuration.Snapshot.Disabled || run.Meta.SeedHash == "" || inputs.repository.DirtyWorktree {
 		return engine.RunRecord{}, false
 	}
 	root, err := resultcache.Root()
@@ -390,7 +389,7 @@ func (c *cli) findReusableRun(inputs planInputs, run engine.RunRecord, opts exec
 
 // recordResult restores the cache entry only after verified success.
 func (c *cli) recordResult(run engine.RunRecord) {
-	if run.Meta.FinishedAt == nil || run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "" || run.Meta.ReusedFrom != nil || resultcache.GetConfigLocation(run.Meta.RepoRoot, run.Meta.ConfigPath) == "" {
+	if run.Meta.FinishedAt == nil || run.Summary.Status != string(engine.StepStateSuccess) || run.Meta.TestedTreeHash == "" || run.Meta.SeedHash == "" || run.Meta.ReusedFrom != nil || resultcache.GetConfigLocation(run.Meta.RepoRoot, run.Meta.ConfigPath) == "" {
 		return
 	}
 	root, err := resultcache.Root()
@@ -404,6 +403,7 @@ func (c *cli) recordResult(run engine.RunRecord) {
 			TestedTreeHash: run.Meta.TestedTreeHash,
 			ConfigHash:     run.Meta.ConfigHash,
 			ConfigLocation: resultcache.GetConfigLocation(run.Meta.RepoRoot, run.Meta.ConfigPath),
+			SeedHash:       run.Meta.SeedHash,
 			PlanHash:       run.Meta.PlanHash,
 			FinishedAt:     *run.Meta.FinishedAt,
 		})
@@ -414,7 +414,7 @@ func (c *cli) recordResult(run engine.RunRecord) {
 }
 
 func resultKey(meta persistence.Meta, tree string) resultcache.Key {
-	return resultcache.Key{RepoSlug: meta.RepoSlug, TestedTreeHash: tree, ConfigHash: meta.ConfigHash, ConfigLocation: resultcache.GetConfigLocation(meta.RepoRoot, meta.ConfigPath), PlanHash: meta.PlanHash}
+	return resultcache.Key{RepoSlug: meta.RepoSlug, TestedTreeHash: tree, ConfigHash: meta.ConfigHash, ConfigLocation: resultcache.GetConfigLocation(meta.RepoRoot, meta.ConfigPath), SeedHash: meta.SeedHash, PlanHash: meta.PlanHash}
 }
 
 // removeCachedResult skips identities that cannot have a cache entry.
@@ -945,6 +945,8 @@ func loadPlanInputs(ctx context.Context, startDirectory string, configPath strin
 		return planInputs{}, fmt.Errorf("configuration changed while preparing the plan; retry with stable inputs")
 	}
 	identity.WorktreeTreeHash = repository.WorktreeTreeHash
+	// Unreadable or external seed inputs can execute, but cannot borrow a cached result.
+	identity.SeedHash, _ = snapshot.GetSeedHash(ctx, repository.Root, configuration.Snapshot.Seed)
 	inputs.identity = identity
 	return inputs, nil
 }
@@ -964,20 +966,22 @@ func (c *cli) executeAndReport(
 	}
 	if !inputs.configuration.Snapshot.Disabled {
 		executionOptions.Snapshot = &engine.SnapshotOptions{
-			Seed:           inputs.configuration.Snapshot.Seed,
-			AllowPlainCopy: inputs.configuration.Snapshot.AllowPlainCopy,
+			ExpectedSeedHash: inputs.identity.SeedHash,
+			Seed:             inputs.configuration.Snapshot.Seed,
+			AllowPlainCopy:   inputs.configuration.Snapshot.AllowPlainCopy,
 		}
 	}
 	if !opts.json {
 		executionOptions.Stdout, executionOptions.Stderr = c.stdout, c.stderr
 	}
+	runRecord.Meta.SeedHash = inputs.identity.SeedHash
 	// Evict before execution: even fatal persistence errors must not revive an older pass.
 	if err := removeCachedResult(runRecord.Meta); err != nil {
 		return err
 	}
 	executed, err := engine.ExecuteRun(commandContext, inputs.store, runRecord, executionOptions)
 	// Another checkout may have cached a pass while this run was executing.
-	if err != nil || executed.Summary.Status != string(engine.StepStateSuccess) || executed.Meta.TestedTreeHash == "" {
+	if err != nil || executed.Summary.Status != string(engine.StepStateSuccess) || executed.Meta.TestedTreeHash == "" || executed.Meta.SeedHash == "" {
 		err = errors.Join(err, removeCachedResult(runRecord.Meta))
 	}
 	if err != nil {
@@ -1760,8 +1764,8 @@ Notes:
   - Independent steps continue after check failures; failed dependencies block dependents, skipped dependencies satisfy needs.
   - Step timeout (e.g. timeout = "10m") is a failure, not operator interruption.
   - Use local-ci plan --json to inspect the complete plan before running it.
-  - A clean checkout with no snapshot seeds or absolute step directories can reuse a passed tree with
-    the same config and plan. No checks execute; contexts say "reused: run <id> on <sha> (same tree)".
+  - A clean checkout without absolute step directories can reuse a passed tree with the same config,
+    plan and verified seed contents. Contexts say "reused: run <id> on <sha> (same tree)".
   - No partial-plan run is supported; --max-parallel 1 changes scheduling, not coverage.
   - Runner progress lines are separate from persisted step logs.
   - On step failure or interruption the CLI prints the exact combined log path immediately.
@@ -1783,7 +1787,7 @@ Flags:
   --config <path>         Config file path. Default: .local-ci.toml
   --no-github             Disable GitHub status posting for this execution
   --max-parallel <count>  Positive worker limit. Default: config max_parallel, otherwise 1
-  --from-step <id>        Rerun this step and every dependent; reuse unrelated successes
+  --from-step <id>        Selective rerun with snapshots disabled; snapshots rerun the full plan
   --json                  One final snapshot on stdout, same schema as show --json; progress on stderr
 
 Examples:
@@ -1792,10 +1796,10 @@ Examples:
   local-ci resume 20260627T150405Z-deadbeef --no-github
 
 Notes:
-  - Resume reuses prior successful steps only when repo identity, HEAD SHA, config hash, and plan hash still match.
+  - Resume requires matching repo identity, HEAD SHA, config hash, and plan hash.
   - Resume fails closed when the stored run identity no longer matches the current checkout.
-  - Interrupted steps are rerun; prior successful steps are reused and reported as reuse progress lines.
-  - --from-step records stale events and reruns dependents, not a partial verification plan.
+  - Fresh snapshots rerun every step to rebuild ignored prerequisite outputs, including with --from-step.
+  - With snapshots disabled, successful steps may be kept; --from-step reruns its dependents.
   - --max-parallel 1 is a serial debugging fallback; it does not change the plan or bypass identity checks.
   - Shared GitHub contexts pass only when every step using that context passed or was skipped.
   - Parallel/JSON output stays in isolated step logs; inspect show/logs from another shell.

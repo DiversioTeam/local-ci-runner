@@ -54,6 +54,8 @@ type Meta struct {
 	// set only when the whole run executed in a snapshot that held that tree
 	// from creation to the final status.
 	TestedTreeHash string `json:"tested_tree_hash,omitempty"`
+	// SeedHash identifies the copied inputs before any step runs, not their generated outputs.
+	SeedHash string `json:"seed_hash,omitempty"`
 	// SnapshotError explains why the snapshot stopped matching the tree.
 	SnapshotError string `json:"snapshot_error,omitempty"`
 	// ReusedFrom names the earlier run whose result this run reused instead of
